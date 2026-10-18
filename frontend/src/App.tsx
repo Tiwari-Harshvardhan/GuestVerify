@@ -80,7 +80,7 @@ type EventDetail = {
   }>;
 };
 
-const API = 'http://localhost:8000';
+const API = '';
 
 const emptyForm = {
   company: 'Amazon',

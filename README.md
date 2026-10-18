@@ -66,6 +66,16 @@ Provider diagnostics:
 cd backend
 python -c "from app.services.bedrock_service import BedrockService; print(BedrockService().diagnose())"
 
+## Vercel deployment
+
+The Vercel configuration builds the React frontend and serves it alongside the FastAPI API. API requests use same-origin `/api` paths, so the local Vite proxy and Vercel deployment share the same frontend code.
+
+1. Install and authenticate the Vercel CLI with `npm install --global vercel` and `vercel login`.
+2. From the repository root, run `vercel` to create a preview deployment, then `vercel --prod` to deploy to production.
+3. Set any required environment variables in the Vercel project settings before promoting a production deployment.
+
+The Vercel setup is for demonstration only. Its SQLite database is stored under `/tmp`, which is ephemeral and not shared between serverless instances; do not use it for persistent or production data. Use a managed database and configure `DATABASE_URL` for any real deployment. The standalone MCP Streamable HTTP server is not hosted by this Vercel setup and must run separately.
+
 ## Project structure
 
 - backend/app: FastAPI app, models, database setup, verification, audit, and integrations.

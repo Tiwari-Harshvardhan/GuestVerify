@@ -2,7 +2,8 @@ import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///" + str(BASE_DIR / "guestverify.db"))
+DEFAULT_DATABASE_PATH = "/tmp/guestverify.db" if os.getenv("VERCEL") else str(BASE_DIR / "guestverify.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///" + DEFAULT_DATABASE_PATH)
 APP_ENV = os.getenv("APP_ENV", "demo")
 DEMO_OWNER_ID = os.getenv("DEMO_OWNER_ID", "demo-owner")
 SECRET_KEY = os.getenv("SECRET_KEY", "guestverify-demo-secret")

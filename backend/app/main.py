@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app.api.routes import router
@@ -76,6 +78,10 @@ def startup() -> None:
     initialize_database()
 
 
-@app.get("/")
-def root() -> dict[str, str]:
-    return {"message": "GuestVerify backend is running"}
+frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+if frontend_dist.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+else:
+    @app.get("/")
+    def root() -> dict[str, str]:
+        return {"message": "GuestVerify backend is running"}
