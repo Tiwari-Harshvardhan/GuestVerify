@@ -164,3 +164,38 @@ def test_provider_service_uses_local_fallback_when_bedrock_is_unavailable(monkey
     result = provider_module.ProviderService().extract_visitor_claim('Amazon delivery for John.')
     assert result['source'] == 'demo-fallback'
     assert result['provider_mode'] == 'local_demo'
+
+
+def test_dashboard_review_count_and_event_action_history():
+    pending_before = client.get('/api/dashboard').json()['pending_approvals']
+    event_response = client.post('/api/events/simulate', json={
+        'event_type': 'delivery_arrival',
+        'device_id': 'action-history-doorbell',
+        'transcript': 'Amazon delivery for John.',
+        'source': 'simulator',
+        'event_timestamp': datetime.utcnow().isoformat(),
+    })
+    assert event_response.status_code == 200, event_response.text
+    event_id = event_response.json()['event_id']
+    listed_event = next(item for item in client.get('/api/events').json() if item['id'] == event_id)
+    assert listed_event['outcome'] == event_response.json()['decision']['outcome']
+    assert listed_event['recommended_action'] == event_response.json()['decision']['recommended_action']
+    assert client.get('/api/dashboard').json()['pending_approvals'] == pending_before + 1
+
+    approval_response = client.post(f'/api/events/{event_id}/approve', json={
+        'decision': 'approve',
+        'requested_action': 'leave_in_porch_box',
+        'approver': 'demo-owner',
+    }, headers={'X-Demo-Owner': 'demo-owner'})
+    assert approval_response.status_code == 200
+    action_response = client.post('/api/actions/simulate', json={
+        'event_id': event_id,
+        'requested_by': 'demo-owner',
+    }, headers={'X-Demo-Owner': 'demo-owner'})
+    assert action_response.status_code == 200
+
+    detail = client.get(f'/api/events/{event_id}').json()
+    assert len(detail['actions']) == 1
+    assert detail['actions'][0]['execution_mode'] == 'simulated'
+    assert 'no_physical_lock_touched' in detail['actions'][0]['result']
+    assert client.get('/api/dashboard').json()['pending_approvals'] == pending_before

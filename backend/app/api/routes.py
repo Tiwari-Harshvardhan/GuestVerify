@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import DEMO_OWNER_ID
 from app.database import get_db
-from app.models import AuditRecord, DeliveryExpectation, EvidenceItem, HomeownerApproval, VerificationDecision, VisitorEvent
+from app.models import ActionRecord, AuditRecord, DeliveryExpectation, EvidenceItem, HomeownerApproval, VerificationDecision, VisitorEvent
 from app.schemas import ActionRequest, AssistantChatRequest, AssistantChatResponse, DeliveryExpectationCreate, DeliveryExpectationRead, HealthResponse, HomeownerApprovalCreate, IntegrationStatus
 from app.services.action_service import approve_request, deny_request, execute_simulated_action
 from app.services.audit_service import list_audit
@@ -87,7 +87,10 @@ def revoke_delivery_route(delivery_id: str, db: Session = Depends(get_db)):
 
 @router.get("/api/events")
 def list_events(db: Session = Depends(get_db)):
-    rows = db.query(VisitorEvent).order_by(VisitorEvent.created_at.desc()).all()
+    rows = db.query(VisitorEvent, VerificationDecision).outerjoin(
+        VerificationDecision,
+        VerificationDecision.event_id == VisitorEvent.id,
+    ).order_by(VisitorEvent.created_at.desc()).all()
     return [{
         "id": row.id,
         "event_type": row.event_type,
@@ -100,7 +103,9 @@ def list_events(db: Session = Depends(get_db)):
         "correlation_id": row.correlation_id,
         "delivery_id": row.delivery_id,
         "created_at": row.created_at.isoformat(),
-    } for row in rows]
+        "outcome": decision.outcome if decision else None,
+        "recommended_action": decision.recommended_action if decision else None,
+    } for row, decision in rows]
 
 
 @router.get("/api/events/{event_id}")
@@ -111,6 +116,7 @@ def get_event(event_id: str, db: Session = Depends(get_db)):
     decision = db.query(VerificationDecision).filter(VerificationDecision.event_id == event_id).first()
     evidence = db.query(EvidenceItem).filter(EvidenceItem.event_id == event_id).all()
     approvals = db.query(HomeownerApproval).filter(HomeownerApproval.event_id == event_id).order_by(HomeownerApproval.timestamp.desc()).all()
+    actions = db.query(ActionRecord).filter(ActionRecord.event_id == event_id).order_by(ActionRecord.timestamp.desc()).all()
     return {
         "event": {
             "id": row.id,
@@ -151,6 +157,14 @@ def get_event(event_id: str, db: Session = Depends(get_db)):
             "timestamp": item.timestamp.isoformat(),
             "expires_at": item.expires_at.isoformat() if item.expires_at else None,
         } for item in approvals],
+        "actions": [{
+            "id": item.id,
+            "action_type": item.action_type,
+            "authorization_check_result": item.authorization_check_result,
+            "execution_mode": item.execution_mode,
+            "result": item.result,
+            "timestamp": item.timestamp.isoformat(),
+        } for item in actions],
     }
 
 
@@ -283,7 +297,10 @@ def chat(payload: AssistantChatRequest, db: Session = Depends(get_db)):
 @router.get("/api/dashboard")
 def dashboard(db: Session = Depends(get_db)):
     total_events = db.query(VisitorEvent).count()
-    pending_approvals = db.query(HomeownerApproval).filter(HomeownerApproval.decision == "approve").count()
+    pending_approvals = db.query(VisitorEvent).filter(
+        VisitorEvent.processing_status == "REVIEW_REQUIRED",
+        ~db.query(HomeownerApproval.id).filter(HomeownerApproval.event_id == VisitorEvent.id).exists(),
+    ).count()
     pending_deliveries = db.query(DeliveryExpectation).filter(DeliveryExpectation.status == "pending").count()
     partial_matches = db.query(VerificationDecision).filter(VerificationDecision.outcome == "PARTIAL_MATCH").count()
     warnings = db.query(VerificationDecision).filter(VerificationDecision.outcome.in_({"MISMATCH", "CONFLICTING_EVIDENCE", "NO_EXPECTED_DELIVERY", "EXPIRED_EXPECTATION"})).count()

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 
 type Delivery = {
   id: string;
@@ -19,9 +19,12 @@ type EventItem = {
   device_id: string;
   event_timestamp: string;
   transcript?: string;
+  source?: string;
   processing_status: string;
   correlation_id: string;
   delivery_id?: string | null;
+  outcome?: string | null;
+  recommended_action?: string | null;
 };
 
 type DashboardSummary = {
@@ -35,6 +38,7 @@ type DashboardSummary = {
 type AuditItem = {
   id: string;
   event_id: string;
+  correlation_id: string;
   actor: string;
   event_type: string;
   details: Record<string, unknown> | string;
@@ -42,15 +46,7 @@ type AuditItem = {
 };
 
 type EventDetail = {
-  event: {
-    id: string;
-    event_type: string;
-    device_id: string;
-    event_timestamp: string;
-    transcript?: string;
-    processing_status: string;
-    correlation_id: string;
-  };
+  event: EventItem;
   decision: {
     outcome: string;
     matching_fields: string[];
@@ -78,297 +74,703 @@ type EventDetail = {
     timestamp: string;
     expires_at?: string | null;
   }>;
+  actions: Array<{
+    id: string;
+    action_type: string;
+    authorization_check_result: string;
+    execution_mode: string;
+    result: string;
+    timestamp: string;
+  }>;
 };
 
-const API = '';
+type ProviderStatus = {
+  ring: string;
+  bedrock: string;
+  simulated_actions: string;
+  provider_mode: string;
+  provider_configured: boolean;
+  fallback_active: boolean;
+  provider_summary: string;
+};
 
-const emptyForm = {
-  company: 'Amazon',
-  recipient: 'John',
-  tracking_reference: 'AMZ-2048',
+type Section = 'overview' | 'deliveries' | 'events' | 'audit' | 'integrations';
+
+const API = '';
+const emptyForm = () => ({
+  company: '',
+  recipient: '',
+  tracking_reference: '',
   expected_start: new Date(Date.now() - 60 * 60 * 1000).toISOString().slice(0, 16),
   expected_end: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString().slice(0, 16),
   destination: 'porch_box',
-  status: 'pending',
   allowed_action: 'leave_in_porch_box',
-  verification_evidence: 'simulated_delivery_reference',
-};
+  verification_evidence: '',
+});
 
-export default function App() {
+const scenarios = [
+  { label: 'Matching claim', text: 'Amazon delivery for John.' },
+  { label: 'Wrong recipient', text: 'Amazon delivery for Alex.' },
+  { label: 'Expired delivery', text: 'FedEx delivery for Jane.' },
+  { label: 'Insufficient evidence', text: 'I have a package for someone here.' },
+];
+
+const navItems: Array<{ id: Section; label: string; icon: string }> = [
+  { id: 'overview', label: 'Overview', icon: 'grid' },
+  { id: 'deliveries', label: 'Deliveries', icon: 'box' },
+  { id: 'events', label: 'Visitor events', icon: 'activity' },
+  { id: 'audit', label: 'Evidence & audit', icon: 'list' },
+  { id: 'integrations', label: 'Integrations', icon: 'nodes' },
+];
+
+function Icon({ name, size = 18 }: { name: string; size?: number }) {
+  const shared = { width: size, height: size, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round' as const, strokeLinejoin: 'round' as const, 'aria-hidden': true as const };
+  const paths: Record<string, JSX.Element> = {
+    shield: <><path d="M12 3 19 6v5c0 4.7-2.8 8-7 10-4.2-2-7-5.3-7-10V6l7-3Z" /><path d="m9 12 2 2 4-4" /></>,
+    grid: <><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></>,
+    box: <><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" /><path d="m4.5 7.7 7.5 4.2 7.5-4.2M12 12v9" /></>,
+    activity: <><path d="M3 12h4l3-8 4 16 3-8h4" /></>,
+    list: <><path d="M8 6h12M8 12h12M8 18h12" /><path d="M4 6h.01M4 12h.01M4 18h.01" /></>,
+    nodes: <><circle cx="6" cy="12" r="2.5" /><circle cx="18" cy="6" r="2.5" /><circle cx="18" cy="18" r="2.5" /><path d="m8.3 10.8 7.4-3.6M8.3 13.2l7.4 3.6" /></>,
+    plus: <><path d="M12 5v14M5 12h14" /></>,
+    arrow: <><path d="M5 12h14M13 6l6 6-6 6" /></>,
+    clock: <><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></>,
+    check: <path d="m5 12 4 4L19 6" />,
+    alert: <><path d="M12 3 2.8 19h18.4L12 3Z" /><path d="M12 9v4m0 3h.01" /></>,
+    close: <><path d="m6 6 12 12M18 6 6 18" /></>,
+    refresh: <><path d="M20 7v5h-5M4 17v-5h5" /><path d="M5.5 9A7 7 0 0 1 18 6.5L20 12M4 12l2 5.5A7 7 0 0 0 18.5 15" /></>,
+    search: <><circle cx="10.8" cy="10.8" r="6.8" /><path d="m16 16 4 4" /></>,
+    chevron: <path d="m9 18 6-6-6-6" />,
+    lock: <><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2" /></>,
+    spark: <><path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3Z" /><path d="m19 16 .8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16Z" /></>,
+  };
+  return <svg {...shared}>{paths[name] ?? paths.alert}</svg>;
+}
+
+function formatDate(value?: string, options?: Intl.DateTimeFormatOptions) {
+  if (!value) return '—';
+  const date = new Date(asUtc(value));
+  return Number.isNaN(date.getTime()) ? '—' : new Intl.DateTimeFormat(undefined, options ?? { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
+function asUtc(value: string) {
+  return /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value}Z`;
+}
+
+function outcomeClass(value?: string | null) {
+  const outcome = value?.toUpperCase() ?? '';
+  if (['MATCH', 'VERIFIED', 'COMPLETED', 'APPROVE'].some((part) => outcome.includes(part))) return 'positive';
+  if (['MISMATCH', 'CONFLICT', 'EXPIRED', 'ELAPSED', 'NO_EXPECTED', 'DENIED', 'BLOCK'].some((part) => outcome.includes(part))) return 'negative';
+  if (['PARTIAL', 'REVIEW', 'MISSING', 'PENDING'].some((part) => outcome.includes(part))) return 'warning';
+  return 'neutral';
+}
+
+function titleCase(value?: string | null) {
+  return (value ?? 'unknown').replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, (letter: string) => letter.toUpperCase());
+}
+
+function StatusBadge({ value, label }: { value?: string | null; label?: string }) {
+  return <span className={`status-badge ${outcomeClass(value)}`}><span className="status-dot" />{label ?? titleCase(value)}</span>;
+}
+
+function App() {
+  const [section, setSection] = useState<Section>('overview');
   const [deliveries, setDeliveries] = useState<Delivery[]>([]);
   const [events, setEvents] = useState<EventItem[]>([]);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [auditItems, setAuditItems] = useState<AuditItem[]>([]);
-  const [eventDetail, setEventDetail] = useState<EventDetail | null>(null);
-  const [providerStatus, setProviderStatus] = useState<{ provider_mode?: string; provider_summary?: string; fallback_active?: boolean; provider_configured?: boolean } | null>(null);
+  const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
+  const [backendConnected, setBackendConnected] = useState<boolean | null>(null);
   const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [eventDetail, setEventDetail] = useState<EventDetail | null>(null);
   const [form, setForm] = useState(emptyForm);
-  const [transcript, setTranscript] = useState('Amazon delivery for John.');
+  const [transcript, setTranscript] = useState(scenarios[0].text);
   const [assistantInput, setAssistantInput] = useState('What happened at the door?');
   const [assistantResponse, setAssistantResponse] = useState('');
-  const [status, setStatus] = useState('');
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [savingDelivery, setSavingDelivery] = useState(false);
+  const [assistantLoading, setAssistantLoading] = useState(false);
+  const [showDeliveryForm, setShowDeliveryForm] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
-  const loadData = async () => {
-    const [deliveryRes, eventRes, summaryRes, auditRes, providerRes] = await Promise.all([
-      fetch(`${API}/api/deliveries`),
-      fetch(`${API}/api/events`),
-      fetch(`${API}/api/dashboard`),
-      fetch(`${API}/api/audit`),
-      fetch(`${API}/api/integrations/status`),
+  const request = useCallback(async (path: string, init?: RequestInit) => {
+    const response = await fetch(`${API}${path}`, init);
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      const message = typeof body?.detail === 'string' ? body.detail : `Request failed (${response.status})`;
+      throw new Error(message);
+    }
+    return response.json();
+  }, []);
+
+  const loadData = useCallback(async () => {
+    const [deliveryData, eventData, summaryData, auditData, integrationData, healthData] = await Promise.all([
+      request('/api/deliveries'),
+      request('/api/events'),
+      request('/api/dashboard'),
+      request('/api/audit'),
+      request('/api/integrations/status'),
+      request('/api/health'),
     ]);
-    const deliveryData = await deliveryRes.json();
-    const eventData = await eventRes.json();
-    const summaryData = await summaryRes.json();
-    const auditData = await auditRes.json();
-    const providerData = await providerRes.json();
     setDeliveries(deliveryData);
     setEvents(eventData);
     setSummary(summaryData);
     setAuditItems(auditData);
-    setProviderStatus(providerData);
+    setProviderStatus(integrationData);
+    setBackendConnected(healthData.status === 'ok');
+    setSelectedEventId((current) => current ?? eventData[0]?.id ?? null);
+  }, [request]);
 
-    if (!selectedEventId && eventData.length > 0) {
-      setSelectedEventId(eventData[0].id);
+  const loadEventDetail = useCallback(async (eventId: string) => {
+    try {
+      const data = await request(`/api/events/${eventId}`);
+      setEventDetail(data);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Unable to load event details.');
     }
-  };
-
-  const loadEventDetail = async (eventId: string) => {
-    const response = await fetch(`${API}/api/events/${eventId}`);
-    if (!response.ok) return;
-    const data = await response.json();
-    setEventDetail(data);
-  };
-
-  useEffect(() => { void loadData(); }, []);
+  }, [request]);
 
   useEffect(() => {
-    if (selectedEventId) {
-      void loadEventDetail(selectedEventId);
-    }
-  }, [selectedEventId]);
+    loadData().catch((loadError: unknown) => {
+      setBackendConnected(false);
+      setError(loadError instanceof Error ? loadError.message : 'Unable to connect to GuestVerify.');
+    });
+  }, [loadData]);
+
+  useEffect(() => {
+    if (selectedEventId) void loadEventDetail(selectedEventId);
+    else setEventDetail(null);
+  }, [selectedEventId, loadEventDetail]);
 
   const selectedEvent = useMemo(() => events.find((event) => event.id === selectedEventId) ?? null, [events, selectedEventId]);
+  const selectedDelivery = useMemo(() => {
+    const id = eventDetail?.event.delivery_id ?? selectedEvent?.delivery_id;
+    return deliveries.find((delivery) => delivery.id === id) ?? null;
+  }, [deliveries, eventDetail, selectedEvent]);
+  const activeDeliveries = useMemo(() => deliveries.filter((delivery) => delivery.status.toLowerCase() === 'pending' && new Date(asUtc(delivery.expected_end)).getTime() >= Date.now()), [deliveries]);
+  const readinessDeliveries = useMemo(() => deliveries
+    .filter((delivery) => ['pending', 'expired'].includes(delivery.status.toLowerCase()))
+    .sort((a, b) => new Date(asUtc(a.expected_start)).getTime() - new Date(asUtc(b.expected_start)).getTime())
+    .slice(0, 5), [deliveries]);
+  const recentEvents = events.slice(0, 6);
+  const pageTitle = navItems.find((item) => item.id === section)?.label ?? 'Overview';
 
-  const simulateEvent = async () => {
-    setStatus('Simulating event...');
-    const response = await fetch(`${API}/api/events/simulate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        event_type: 'delivery_arrival',
-        device_id: 'ring-doorbell-demo',
-        transcript,
-        source: 'simulator',
-        event_timestamp: new Date().toISOString(),
-      }),
-    });
-    const result = await response.json();
-    setStatus(JSON.stringify(result, null, 2));
-    await loadData();
-    if (result.event_id) {
-      setSelectedEventId(result.event_id);
+  const clearFeedback = () => {
+    setError('');
+    setNotice('');
+  };
+
+  const simulateEvent = async (event?: FormEvent) => {
+    event?.preventDefault();
+    clearFeedback();
+    if (!transcript.trim()) {
+      setError('Enter the visitor’s claim before analyzing the event.');
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await request('/api/events/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_type: 'delivery_arrival',
+          device_id: 'ring-doorbell-demo',
+          transcript: transcript.trim(),
+          source: 'simulator',
+          event_timestamp: new Date().toISOString(),
+        }),
+      });
+      await loadData();
+      if (result.event_id) setSelectedEventId(result.event_id);
+      setNotice('Event analyzed. Review the evidence and recommendation below; a visitor’s claim is not identity proof.');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'The event could not be analyzed.');
+    } finally {
+      setLoading(false);
     }
   };
 
-  const createDelivery = async () => {
-    const payload = {
-      ...form,
-      expected_start: new Date(form.expected_start).toISOString(),
-      expected_end: new Date(form.expected_end).toISOString(),
-    };
-    const response = await fetch(`${API}/api/deliveries`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (response.ok) {
-      setForm(emptyForm);
+  const createDelivery = async (event: FormEvent) => {
+    event.preventDefault();
+    clearFeedback();
+    if (!form.company.trim() || !form.recipient.trim()) {
+      setError('Carrier and recipient are required.');
+      return;
+    }
+    if (new Date(form.expected_end) <= new Date(form.expected_start)) {
+      setError('The expected end must be later than the expected start.');
+      return;
+    }
+    setSavingDelivery(true);
+    try {
+      await request('/api/deliveries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...form,
+          company: form.company.trim(),
+          recipient: form.recipient.trim(),
+          tracking_reference: form.tracking_reference.trim() || null,
+          verification_evidence: form.verification_evidence.trim() || null,
+          expected_start: new Date(form.expected_start).toISOString(),
+          expected_end: new Date(form.expected_end).toISOString(),
+        }),
+      });
+      setForm(emptyForm());
+      setShowDeliveryForm(false);
+      setNotice('Delivery expectation added.');
       await loadData();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'The delivery could not be saved.');
+    } finally {
+      setSavingDelivery(false);
     }
   };
 
   const revokeDelivery = async (deliveryId: string) => {
-    await fetch(`${API}/api/deliveries/${deliveryId}/revoke`, { method: 'POST' });
-    await loadData();
+    clearFeedback();
+    try {
+      await request(`/api/deliveries/${deliveryId}/revoke`, { method: 'POST' });
+      setNotice('Delivery expectation revoked.');
+      await loadData();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'The delivery could not be revoked.');
+    }
   };
 
   const approveEvent = async (eventId: string) => {
-    await fetch(`${API}/api/events/${eventId}/approve`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Demo-Owner': 'demo-owner' },
-      body: JSON.stringify({ decision: 'approve', requested_action: 'leave_in_porch_box', approver: 'demo-owner' }),
-    });
-    await fetch(`${API}/api/actions/simulate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Demo-Owner': 'demo-owner' },
-      body: JSON.stringify({ event_id: eventId, action_type: 'simulated_porch_box', requested_by: 'demo-owner' }),
-    });
-    await loadData();
+    clearFeedback();
+    try {
+      await request(`/api/events/${eventId}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Demo-Owner': 'demo-owner' },
+        body: JSON.stringify({ decision: 'approve', requested_action: 'leave_in_porch_box', approver: 'demo-owner' }),
+      });
+      await request('/api/actions/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Demo-Owner': 'demo-owner' },
+        body: JSON.stringify({ event_id: eventId, action_type: 'simulated_porch_box', requested_by: 'demo-owner' }),
+      });
+      setNotice('Homeowner approval recorded and simulated action completed. No physical device was operated.');
+      await loadData();
+      await loadEventDetail(eventId);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'The simulated action could not be completed.');
+    }
   };
 
   const requestEvidence = async (eventId: string) => {
-    await fetch(`${API}/api/events/${eventId}/request-evidence`, {
-      method: 'POST',
-      headers: { 'X-Demo-Owner': 'demo-owner' },
-    });
-    await loadData();
+    clearFeedback();
+    try {
+      await request(`/api/events/${eventId}/request-evidence`, { method: 'POST', headers: { 'X-Demo-Owner': 'demo-owner' } });
+      setNotice('Evidence request recorded in the audit trail.');
+      await loadData();
+      await loadEventDetail(eventId);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'The evidence request could not be recorded.');
+    }
   };
 
-  const askAssistant = async () => {
-    const response = await fetch(`${API}/api/assistant/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: assistantInput }),
-    });
-    const data = await response.json();
-    setAssistantResponse(data.response || 'No response');
-    await loadData();
+  const askAssistant = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!assistantInput.trim()) return;
+    clearFeedback();
+    setAssistantLoading(true);
+    try {
+      const data = await request('/api/assistant/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: assistantInput.trim() }),
+      });
+      setAssistantResponse(data.response || 'No response was returned.');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'The assistant is unavailable.');
+    } finally {
+      setAssistantLoading(false);
+    }
   };
+
+  const navigate = (next: Section) => {
+    setSection(next);
+    setMobileNavOpen(false);
+    clearFeedback();
+  };
+
+  const nav = (
+    <>
+      <div className="brand-lockup">
+        <span className="brand-mark"><Icon name="shield" size={23} /></span>
+        <span className="brand-name">Guest<span>Verify</span></span>
+      </div>
+      <div className="nav-caption">WORKSPACE</div>
+      <nav className="side-nav" aria-label="Main navigation">
+        {navItems.map((item) => (
+          <button key={item.id} className={`nav-item ${section === item.id ? 'active' : ''}`} onClick={() => navigate(item.id)} aria-current={section === item.id ? 'page' : undefined}>
+            <Icon name={item.icon} size={18} /><span>{item.label}</span>
+            {item.id === 'events' && summary?.pending_approvals ? <span className="nav-count">{summary.pending_approvals}</span> : null}
+          </button>
+        ))}
+      </nav>
+      <div className="sidebar-bottom">
+        <div className="mode-card">
+          <span className="mode-indicator" />
+          <div><strong>Local demo mode</strong><span>Deterministic verification</span></div>
+        </div>
+        <div className="sidebar-footnote"><Icon name="alert" size={14} /> Ring activity is simulated</div>
+      </div>
+    </>
+  );
 
   return (
     <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <div className="eyebrow">GuestVerify</div>
-          <h1>Verify the delivery, not just the visitor’s story.</h1>
-        </div>
-        <div className="status-pill">{providerStatus?.provider_mode ?? 'local_demo'} / simulated Ring</div>
-      </header>
-
-      <section className="summary-grid">
-        <div className="card"><span>Events</span><strong>{summary?.total_events ?? 0}</strong></div>
-        <div className="card"><span>Pending approvals</span><strong>{summary?.pending_approvals ?? 0}</strong></div>
-        <div className="card"><span>Live deliveries</span><strong>{summary?.pending_deliveries ?? 0}</strong></div>
-        <div className="card"><span>Partial matches</span><strong>{summary?.partial_matches ?? 0}</strong></div>
-      </section>
-
-      <section className="panel provider-panel">
-        <h3>AI / integration status</h3>
-        <div className="muted">Mode: {providerStatus?.provider_mode ?? 'local_demo'}</div>
-        <div className="muted">Configured: {providerStatus?.provider_configured === false ? 'No' : 'Yes'}</div>
-        <div className="muted">Fallback active: {providerStatus?.fallback_active ? 'Yes' : 'No'}</div>
-        <div className="muted">{providerStatus?.provider_summary ?? 'Local demo mode is active.'}</div>
-      </section>
-
-      <section className="content-grid">
-        <div className="panel">
-          <h3>Delivery management</h3>
-          <div className="form-grid">
-            <input value={form.company} onChange={(e) => setForm({ ...form, company: e.target.value })} placeholder="Company" />
-            <input value={form.recipient} onChange={(e) => setForm({ ...form, recipient: e.target.value })} placeholder="Recipient" />
-            <input value={form.tracking_reference} onChange={(e) => setForm({ ...form, tracking_reference: e.target.value })} placeholder="Tracking reference" />
-            <input type="datetime-local" value={form.expected_start} onChange={(e) => setForm({ ...form, expected_start: e.target.value })} />
-            <input type="datetime-local" value={form.expected_end} onChange={(e) => setForm({ ...form, expected_end: e.target.value })} />
-            <input value={form.destination} onChange={(e) => setForm({ ...form, destination: e.target.value })} placeholder="Destination" />
-            <input value={form.allowed_action} onChange={(e) => setForm({ ...form, allowed_action: e.target.value })} placeholder="Allowed action" />
-            <input value={form.verification_evidence} onChange={(e) => setForm({ ...form, verification_evidence: e.target.value })} placeholder="Verification evidence" />
+      <aside className="sidebar">{nav}</aside>
+      {mobileNavOpen ? <div className="mobile-scrim" onClick={() => setMobileNavOpen(false)} /> : null}
+      <aside className={`mobile-sidebar ${mobileNavOpen ? 'open' : ''}`}>{nav}</aside>
+      <div className="app-main">
+        <header className="app-header">
+          <div className="header-leading">
+            <button className="mobile-menu icon-button" aria-label="Open navigation" onClick={() => setMobileNavOpen(true)}><Icon name="list" /></button>
+            <div className="breadcrumb"><span>GuestVerify</span><Icon name="chevron" size={14} /><strong>{pageTitle}</strong></div>
           </div>
-          <button onClick={createDelivery}>Add delivery expectation</button>
-          <div className="stack-list">
-            {deliveries.map((item) => (
-              <div key={item.id} className="row-card">
-                <div>
-                  <strong>{item.company}</strong> for {item.recipient}
-                  <div className="muted">{item.destination} · {item.status}</div>
-                </div>
-                <div className="row-actions">
-                  <span className="badge">{item.allowed_action}</span>
-                  <button className="secondary" onClick={() => revokeDelivery(item.id)}>Revoke</button>
-                </div>
-              </div>
-            ))}
+          <div className="header-status">
+            <span className="demo-label"><span className="demo-dot" />Demo environment</span>
+            <span className={`connection-label ${backendConnected === false ? 'offline' : ''}`}><span className="connection-dot" />{backendConnected === null ? 'Connecting' : backendConnected ? 'API connected' : 'API unavailable'}</span>
           </div>
-        </div>
+        </header>
 
-        <div className="panel">
-          <h3>Live event simulator</h3>
-          <textarea value={transcript} onChange={(e) => setTranscript(e.target.value)} rows={5} />
-          <button onClick={simulateEvent}>Trigger simulated visitor event</button>
-          <pre>{status}</pre>
-        </div>
-      </section>
-
-      <section className="panel">
-        <h3>Evidence verification and decision detail</h3>
-        {selectedEvent ? (
-          <div className="detail-grid">
-            <div>
-              <div className="detail-header">
-                <strong>{selectedEvent.event_type}</strong>
-                <span className="badge">{selectedEvent.processing_status}</span>
-              </div>
-              <div className="muted">Device: {selectedEvent.device_id}</div>
-              <div className="muted">Timestamp: {new Date(selectedEvent.event_timestamp).toLocaleString()}</div>
-              <div className="muted">Transcript: {selectedEvent.transcript}</div>
-            </div>
-            <div>
-              {eventDetail?.decision ? (
-                <div>
-                  <div className="decision">Outcome: {eventDetail.decision.outcome}</div>
-                  <div className="muted">Recommended action: {eventDetail.decision.recommended_action}</div>
-                  <div className="muted">Policy: {eventDetail.decision.policy_decision}</div>
-                  <div className="muted">Explanation: {eventDetail.decision.explanation}</div>
-                </div>
-              ) : <div className="muted">No verification decision recorded yet</div>}
-            </div>
-          </div>
-        ) : <div className="muted">No event selected</div>}
-        {eventDetail?.evidence.length ? (
-          <div className="mini-list">
-            {eventDetail.evidence.map((item) => (
-              <div key={item.id} className="mini-item">
-                <strong>{item.evidence_type}</strong> · {item.verification_status}
-                <div className="muted">{item.source} · {new Date(item.timestamp).toLocaleString()}</div>
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </section>
-
-      <section className="content-grid">
-        <div className="panel">
-          <h3>Recent events</h3>
-          <div className="event-list">
-            {events.map((event) => (
-              <div key={event.id} className={`event-row ${selectedEventId === event.id ? 'selected' : ''}`}>
-                <button className="link-button" onClick={() => setSelectedEventId(event.id)}>
-                  <strong>{event.event_type}</strong> · {event.processing_status}
-                </button>
-                <small>{new Date(event.event_timestamp).toLocaleString()}</small>
-                <div className="row-actions">
-                  <button onClick={() => approveEvent(event.id)}>Approve</button>
-                  <button className="secondary" onClick={() => requestEvidence(event.id)}>Evidence</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div className="panel">
-          <h3>Audit trail</h3>
-          <div className="audit-list">
-            {auditItems.map((item) => (
-              <div key={item.id} className="audit-item">
-                <div className="detail-header">
-                  <strong>{item.event_type}</strong>
-                  <span className="badge">{item.actor}</span>
-                </div>
-                <div className="muted">{new Date(item.timestamp).toLocaleString()}</div>
-                <div className="muted">{typeof item.details === 'string' ? item.details : JSON.stringify(item.details)}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section className="panel assistant-panel">
-        <h3>Homeowner assistant</h3>
-        <div className="assistant-row">
-          <input value={assistantInput} onChange={(e) => setAssistantInput(e.target.value)} placeholder="Ask about the current event" />
-          <button onClick={askAssistant}>Ask</button>
-        </div>
-        <div className="assistant-output">{assistantResponse || 'Awaiting a question...'}</div>
-      </section>
+        <main className="page-content">
+          {(error || notice) ? <div className={`feedback ${error ? 'feedback-error' : 'feedback-success'}`} role={error ? 'alert' : 'status'}><Icon name={error ? 'alert' : 'check'} size={17} /><span>{error || notice}</span><button className="feedback-close" aria-label="Dismiss message" onClick={clearFeedback}><Icon name="close" size={16} /></button></div> : null}
+          {section === 'overview' ? (
+            <Overview
+              summary={summary}
+              activeDeliveries={activeDeliveries}
+              readinessDeliveries={readinessDeliveries}
+              events={recentEvents}
+              deliveries={deliveries}
+              assistantInput={assistantInput}
+              assistantResponse={assistantResponse}
+              assistantLoading={assistantLoading}
+              onAssistantInput={setAssistantInput}
+              onAskAssistant={askAssistant}
+              onNavigate={navigate}
+              onSelectEvent={(id) => { setSelectedEventId(id); navigate('events'); }}
+              onSimulate={() => navigate('events')}
+            />
+          ) : null}
+          {section === 'deliveries' ? (
+            <DeliveriesPage
+              deliveries={deliveries}
+              showForm={showDeliveryForm}
+              form={form}
+              saving={savingDelivery}
+              onShowForm={() => { setForm(emptyForm()); setShowDeliveryForm(true); }}
+              onCloseForm={() => { setShowDeliveryForm(false); clearFeedback(); }}
+              onChange={(next) => setForm(next)}
+              onSubmit={createDelivery}
+              onRevoke={revokeDelivery}
+            />
+          ) : null}
+          {section === 'events' ? (
+            <EventsPage
+              events={events}
+              selectedEvent={selectedEvent}
+              detail={eventDetail}
+              delivery={selectedDelivery}
+              transcript={transcript}
+              busy={loading}
+              onTranscript={setTranscript}
+              onScenario={setTranscript}
+              onSimulate={simulateEvent}
+              onSelect={setSelectedEventId}
+              onApprove={approveEvent}
+              onRequestEvidence={requestEvidence}
+            />
+          ) : null}
+          {section === 'audit' ? (
+            <AuditPage events={events} auditItems={auditItems} selectedEventId={selectedEventId} detail={eventDetail} onSelect={setSelectedEventId} />
+          ) : null}
+          {section === 'integrations' ? <IntegrationsPage provider={providerStatus} connected={backendConnected} onRefresh={() => loadData().catch((e: unknown) => setError(e instanceof Error ? e.message : 'Refresh failed.'))} /> : null}
+        </main>
+      </div>
     </div>
   );
 }
+
+function PageHeading({ title, description, action }: { title: string; description: string; action?: JSX.Element }) {
+  return <div className="page-heading"><div><h1>{title}</h1><p>{description}</p></div>{action}</div>;
+}
+
+function Overview({ summary, activeDeliveries, readinessDeliveries, events, deliveries, assistantInput, assistantResponse, assistantLoading, onAssistantInput, onAskAssistant, onNavigate, onSelectEvent, onSimulate }: {
+  summary: DashboardSummary | null;
+  activeDeliveries: Delivery[];
+  readinessDeliveries: Delivery[];
+  events: EventItem[];
+  deliveries: Delivery[];
+  assistantInput: string;
+  assistantResponse: string;
+  assistantLoading: boolean;
+  onAssistantInput: (value: string) => void;
+  onAskAssistant: (event: FormEvent) => void;
+  onNavigate: (section: Section) => void;
+  onSelectEvent: (id: string) => void;
+  onSimulate: () => void;
+}) {
+  const metrics = [
+    { label: 'Visitor events', value: summary?.total_events ?? '—', tone: 'blue', note: 'Recorded activity' },
+    { label: 'Pending reviews', value: summary?.pending_approvals ?? '—', tone: 'amber', note: 'Homeowner attention' },
+    { label: 'Active deliveries', value: summary ? activeDeliveries.length : '—', tone: 'green', note: 'Expected now or soon' },
+    { label: 'Needs attention', value: summary ? summary.partial_matches + summary.warnings : '—', tone: 'red', note: 'Partial or conflicting' },
+  ];
+  return (
+    <>
+      <PageHeading title="Overview" description="Monitor expected deliveries and verify visitor claims." action={<button className="button button-secondary" onClick={() => onNavigate('events')}><Icon name="activity" size={16} /> Simulate event</button>} />
+      <section className="metric-row" aria-label="Delivery and visitor activity summary">
+        {metrics.map((metric) => <div className="metric" key={metric.label}><span className={`metric-marker ${metric.tone}`} /><div className="metric-copy"><span>{metric.label}</span><strong>{metric.value}</strong><small>{metric.note}</small></div></div>)}
+      </section>
+      <div className="overview-grid">
+        <section className="surface activity-panel">
+          <div className="section-heading"><div><h2>Recent visitor activity</h2><p>Claims, verification outcomes, and next steps</p></div><button className="text-button" onClick={() => onNavigate('events')}>All events <Icon name="arrow" size={15} /></button></div>
+          {events.length === 0 ? <EmptyState icon="activity" title="No visitor events yet" text="Simulate an arrival to review a claim against your delivery expectations." action={<button className="button button-primary" onClick={onSimulate}>Simulate visitor event</button>} /> : (
+            <div className="activity-list">
+              {events.map((event) => {
+                const delivery = deliveries.find((item) => item.id === event.delivery_id);
+                return <button className="activity-row" key={event.id} onClick={() => onSelectEvent(event.id)}>
+                  <span className={`activity-icon ${outcomeClass(event.outcome || event.processing_status)}`}><Icon name="activity" size={17} /></span>
+                      <span className="activity-main"><span className="activity-title">{event.transcript || titleCase(event.event_type)}</span><span className="activity-sub">{delivery ? `${delivery.company} · ${delivery.recipient}` : 'No delivery linked'} <span className="separator">·</span> {event.device_id}</span><span className="activity-recommendation">Recommends: {titleCase(event.recommended_action)}</span></span>
+                      <span className="activity-meta"><StatusBadge value={event.outcome || event.processing_status} /><time>{formatDate(event.event_timestamp, { hour: 'numeric', minute: '2-digit' })}</time></span>
+                  <Icon name="chevron" size={16} />
+                </button>;
+              })}
+            </div>
+          )}
+          <div className="activity-foot"><span>Visitor statements are claims, not identity evidence.</span><button className="text-button" onClick={() => onNavigate('audit')}>Review evidence & audit <Icon name="arrow" size={15} /></button></div>
+        </section>
+        <section className="surface readiness-panel">
+          <div className="section-heading"><div><h2>Delivery readiness</h2><p>Current expectations and time windows</p></div><button className="icon-button" aria-label="View all deliveries" onClick={() => onNavigate('deliveries')}><Icon name="arrow" size={17} /></button></div>
+          {readinessDeliveries.length === 0 ? <EmptyState icon="box" title="No active expectations" text="Add a delivery so incoming claims can be compared against known details." action={<button className="button button-secondary" onClick={() => onNavigate('deliveries')}>Manage deliveries</button>} /> : (
+            <div className="readiness-list">
+              {readinessDeliveries.map((delivery) => <div className="readiness-row" key={delivery.id}>
+                <span className="carrier-avatar">{delivery.company.slice(0, 1).toUpperCase()}</span>
+                <span className="readiness-copy"><strong>{delivery.company} <span>for</span> {delivery.recipient}</strong><small>{delivery.tracking_reference || 'No reference provided'} · {deliveryState(delivery)}</small></span>
+                <span className="readiness-time"><strong>{formatDate(delivery.expected_start, { month: 'short', day: 'numeric' })}</strong><small>{formatDate(delivery.expected_start, { hour: 'numeric', minute: '2-digit' })}–{formatDate(delivery.expected_end, { hour: 'numeric', minute: '2-digit' })}</small></span>
+              </div>)}
+            </div>
+          )}
+          <button className="readiness-add" onClick={() => onNavigate('deliveries')}><Icon name="plus" size={16} /> Add delivery expectation</button>
+        </section>
+      </div>
+      <section className="surface assistant-panel">
+        <div className="section-heading"><div><h2>Ask GuestVerify</h2><p>Get a summary of the latest visitor event.</p></div><span className="assistant-mode"><Icon name="spark" size={13} /> Demo assistant</span></div>
+        <form className="assistant-form" onSubmit={onAskAssistant}>
+          <label className="sr-only" htmlFor="assistant-question">Ask about visitor activity</label>
+          <input id="assistant-question" value={assistantInput} onChange={(event) => onAssistantInput(event.target.value)} placeholder="Ask about the current event…" />
+          <button className="button button-secondary" type="submit" disabled={assistantLoading}>{assistantLoading ? 'Asking…' : 'Ask'}</button>
+        </form>
+        {assistantResponse ? <p className="assistant-response">{assistantResponse}</p> : <p className="assistant-disclaimer">Answers summarize recorded demo data. They do not authorize an action.</p>}
+      </section>
+      <section className="principle-strip"><Icon name="shield" size={19} /><span><strong>Verify the delivery, not just the visitor’s story.</strong> A matching claim may inform a decision, but it does not prove identity or authorize physical access.</span></section>
+    </>
+  );
+}
+
+function EmptyState({ icon, title, text, action }: { icon: string; title: string; text: string; action?: JSX.Element }) {
+  return <div className="empty-state"><span className="empty-icon"><Icon name={icon} size={21} /></span><strong>{title}</strong><p>{text}</p>{action}</div>;
+}
+
+function DeliveriesPage({ deliveries, showForm, form, saving, onShowForm, onCloseForm, onChange, onSubmit, onRevoke }: {
+  deliveries: Delivery[];
+  showForm: boolean;
+  form: ReturnType<typeof emptyForm>;
+  saving: boolean;
+  onShowForm: () => void;
+  onCloseForm: () => void;
+  onChange: (form: ReturnType<typeof emptyForm>) => void;
+  onSubmit: (event: FormEvent) => void;
+  onRevoke: (id: string) => void;
+}) {
+  const activeCount = deliveries.filter((delivery) => delivery.status.toLowerCase() === 'pending').length;
+  return <>
+    <PageHeading title="Deliveries" description="Manage expected arrivals and the evidence used to review them." action={<button className="button button-primary" onClick={onShowForm}><Icon name="plus" size={16} /> Add expectation</button>} />
+    <div className="page-toolbar"><span><strong>{deliveries.length}</strong> expectations <span className="toolbar-divider">·</span> <strong>{activeCount}</strong> active</span><span className="toolbar-note"><Icon name="clock" size={15} /> Time windows shown in your local timezone</span></div>
+    {showForm ? <section className="surface delivery-form">
+      <div className="form-heading"><div><h2>New delivery expectation</h2><p>Use details from a trusted order or tracking source where available.</p></div><button className="icon-button" aria-label="Close form" onClick={onCloseForm}><Icon name="close" /></button></div>
+      <form onSubmit={onSubmit}>
+        <div className="form-section-label">DELIVERY DETAILS</div>
+        <div className="form-grid">
+          <Field label="Carrier" required><input autoFocus value={form.company} onChange={(event) => onChange({ ...form, company: event.target.value })} placeholder="e.g. Amazon, UPS, FedEx" required /></Field>
+          <Field label="Recipient" required><input value={form.recipient} onChange={(event) => onChange({ ...form, recipient: event.target.value })} placeholder="Name on the order" required /></Field>
+          <Field label="Tracking or reference ID" optional><input value={form.tracking_reference} onChange={(event) => onChange({ ...form, tracking_reference: event.target.value })} placeholder="e.g. 1Z… or order reference" /></Field>
+          <Field label="Destination"><select value={form.destination} onChange={(event) => onChange({ ...form, destination: event.target.value })}><option value="porch_box">Porch box</option><option value="doorstep">Doorstep</option><option value="mailroom">Mailroom</option><option value="handover">Hand to recipient</option></select></Field>
+        </div>
+        <div className="form-section-label form-section-spaced">EXPECTED TIME WINDOW</div>
+        <div className="form-grid form-grid-two">
+          <Field label="Expected from" required><input type="datetime-local" value={form.expected_start} onChange={(event) => onChange({ ...form, expected_start: event.target.value })} required /></Field>
+          <Field label="Expected until" required><input type="datetime-local" value={form.expected_end} onChange={(event) => onChange({ ...form, expected_end: event.target.value })} required /></Field>
+        </div>
+        <details className="advanced-fields"><summary>Verification and action policy <span>Optional</span></summary><div className="form-grid advanced-grid">
+          <Field label="Allowed simulated action"><select value={form.allowed_action} onChange={(event) => onChange({ ...form, allowed_action: event.target.value })}><option value="leave_in_porch_box">Leave in porch box</option><option value="handover_only">Handover only</option><option value="no_action">No action</option></select></Field>
+          <Field label="Expected verification evidence" optional><input value={form.verification_evidence} onChange={(event) => onChange({ ...form, verification_evidence: event.target.value })} placeholder="e.g. tracking reference" /></Field>
+        </div></details>
+        <div className="form-actions"><button type="button" className="button button-secondary" onClick={onCloseForm}>Cancel</button><button type="submit" className="button button-primary" disabled={saving}>{saving ? <><span className="spinner" /> Saving…</> : 'Save expectation'}</button></div>
+      </form>
+    </section> : null}
+    <section className="surface delivery-table-surface">
+      <div className="section-heading"><div><h2>Expected deliveries</h2><p>Revoke an expectation when plans change.</p></div></div>
+      {deliveries.length === 0 ? <EmptyState icon="box" title="No delivery expectations" text="Add a delivery to help evaluate future visitor claims." action={<button className="button button-primary" onClick={onShowForm}>Add first delivery</button>} /> : (
+        <div className="table-scroll"><table className="data-table"><thead><tr><th>Carrier & recipient</th><th>Reference</th><th>Expected arrival</th><th>Status</th><th><span className="sr-only">Actions</span></th></tr></thead><tbody>
+          {deliveries.map((delivery) => <tr key={delivery.id}>
+            <td><span className="table-primary">{delivery.company}</span><span className="table-secondary">{delivery.recipient}</span></td>
+            <td><span className="table-reference">{delivery.tracking_reference || '—'}</span></td>
+            <td><span className="table-primary">{formatDate(delivery.expected_start, { dateStyle: 'medium' })}</span><span className="table-secondary">{formatDate(delivery.expected_start, { hour: 'numeric', minute: '2-digit' })} – {formatDate(delivery.expected_end, { hour: 'numeric', minute: '2-digit' })}</span></td>
+            <td><StatusBadge value={delivery.status === 'pending' ? deliveryState(delivery) : delivery.status} /></td>
+            <td className="table-actions">{delivery.status.toLowerCase() === 'pending' ? <button className="button button-quiet button-small" onClick={() => onRevoke(delivery.id)}>Revoke</button> : <span className="muted-action">No actions</span>}</td>
+          </tr>)}
+        </tbody></table></div>
+      )}
+    </section>
+  </>;
+}
+
+function Field({ label, required, optional, children }: { label: string; required?: boolean; optional?: boolean; children: JSX.Element }) {
+  return <label className="field"><span>{label}{required ? <em>Required</em> : optional ? <small>Optional</small> : null}</span>{children}</label>;
+}
+
+function deliveryState(delivery: Delivery) {
+  const now = Date.now();
+  const start = new Date(asUtc(delivery.expected_start)).getTime();
+  const end = new Date(asUtc(delivery.expected_end)).getTime();
+  if (delivery.status.toLowerCase() !== 'pending') return titleCase(delivery.status);
+  if (end < now) return 'window elapsed';
+  if (start > now) return 'scheduled';
+  return 'expected now';
+}
+
+function EventsPage({ events, selectedEvent, detail, delivery, transcript, busy, onTranscript, onScenario, onSimulate, onSelect, onApprove, onRequestEvidence }: {
+  events: EventItem[];
+  selectedEvent: EventItem | null;
+  detail: EventDetail | null;
+  delivery: Delivery | null;
+  transcript: string;
+  busy: boolean;
+  onTranscript: (value: string) => void;
+  onScenario: (value: string) => void;
+  onSimulate: (event?: FormEvent) => void;
+  onSelect: (id: string) => void;
+  onApprove: (id: string) => void;
+  onRequestEvidence: (id: string) => void;
+}) {
+  const claim = detail?.event.transcript || selectedEvent?.transcript || '';
+  return <>
+    <PageHeading title="Visitor events" description="Simulate arrivals, inspect verification decisions, and review next steps." />
+    <div className="event-workspace">
+      <div className="event-main-column">
+        <section className="surface simulator">
+          <div className="section-heading"><div className="simulator-title"><span className="simulator-icon"><Icon name="activity" size={18} /></span><div><h2>Simulate visitor event</h2><p>Test the verification workflow with a visitor’s stated claim.</p></div></div><span className="simulation-tag"><span />Simulated</span></div>
+          <form onSubmit={(event) => onSimulate(event)}>
+            <label className="field"><span>Visitor claim</span><textarea value={transcript} onChange={(event) => onTranscript(event.target.value)} rows={3} placeholder="Enter what the visitor says…" /></label>
+            <div className="scenario-row"><span>Try a scenario</span>{scenarios.map((scenario) => <button key={scenario.label} type="button" className={`scenario-chip ${transcript === scenario.text ? 'chosen' : ''}`} onClick={() => onScenario(scenario.text)}>{scenario.label}</button>)}</div>
+            <div className="simulator-footer"><span><Icon name="alert" size={15} /> A spoken claim is not proof of identity.</span><button className="button button-primary" type="submit" disabled={busy}>{busy ? <><span className="spinner" /> Analyzing…</> : <><Icon name="spark" size={16} /> Analyze event</>}</button></div>
+          </form>
+        </section>
+        {selectedEvent && detail ? <EventResult event={selectedEvent} detail={detail} delivery={delivery} onApprove={onApprove} onRequestEvidence={onRequestEvidence} /> : <section className="surface event-placeholder"><EmptyState icon="shield" title="Verification results appear here" text="Analyze a simulated event to see the evidence reviewed, field comparisons, outcome, and recommendation." /></section>}
+      </div>
+      <aside className="surface event-history">
+        <div className="section-heading"><div><h2>Event history</h2><p>{events.length} recorded {events.length === 1 ? 'event' : 'events'}</p></div></div>
+        {events.length === 0 ? <EmptyState icon="activity" title="No events recorded" text="Simulated visitor activity will appear here." /> : <div className="history-list">{events.map((event) => <button key={event.id} className={`history-item ${selectedEvent?.id === event.id ? 'selected' : ''}`} onClick={() => onSelect(event.id)}>
+          <span className={`history-mark ${outcomeClass(event.processing_status)}`}><Icon name="activity" size={15} /></span><span className="history-copy"><strong>{event.transcript || titleCase(event.event_type)}</strong><small>{formatDate(event.event_timestamp)}</small><StatusBadge value={event.processing_status} /></span><Icon name="chevron" size={15} />
+        </button>)}</div>}
+      </aside>
+    </div>
+  </>;
+}
+
+function EventResult({ event, detail, delivery, onApprove, onRequestEvidence }: { event: EventItem; detail: EventDetail; delivery: Delivery | null; onApprove: (id: string) => void; onRequestEvidence: (id: string) => void }) {
+  const decision = detail.decision;
+  const auditRelated = detail.evidence.length > 0 || detail.approvals.length > 0;
+  return <section className="surface result-panel">
+    <div className="result-header"><div><div className="result-eyebrow">VERIFICATION RESULT <span>·</span> {formatDate(event.event_timestamp)}</div><h2>{decision?.outcome ? titleCase(decision.outcome) : 'No decision recorded'}</h2></div><StatusBadge value={decision?.outcome || event.processing_status} /></div>
+    <div className="result-claim"><span>VISITOR CLAIM</span><p>“{event.transcript || 'No transcript provided'}”</p><small>Claimed by visitor · not independently authenticated</small></div>
+    <div className="result-facts">
+      <Fact label="Related expectation" value={delivery ? `${delivery.company} · ${delivery.recipient}` : 'No delivery linked'} detail={delivery?.tracking_reference || 'No reference'} />
+      <Fact label="Recommendation" value={titleCase(decision?.recommended_action)} detail={decision?.policy_decision ? `Policy: ${titleCase(decision.policy_decision)}` : 'No recommendation available'} />
+    </div>
+    <div className="comparison-grid">
+      <Comparison title="Matched fields" icon="check" tone="positive" items={decision?.matching_fields ?? []} empty="No matching fields returned." />
+      <Comparison title="Conflicts" icon="alert" tone="negative" items={decision?.conflicting_fields ?? []} empty="No conflicts returned." />
+      <Comparison title="Missing evidence" icon="search" tone="warning" items={decision?.missing_evidence ?? []} empty="No missing evidence reported." />
+    </div>
+    {decision?.explanation ? <div className="reasoning"><strong>Reasoning</strong><p>{decision.explanation}</p></div> : null}
+    <div className="evidence-reviewed"><div className="subsection-heading"><h3>Evidence reviewed</h3><span>{detail.evidence.length} items</span></div>
+      {detail.evidence.length ? <div className="evidence-list">{detail.evidence.map((item) => <div className="evidence-row" key={item.id}><span className={`evidence-icon ${item.independent_authentication ? 'verified' : 'claim'}`}><Icon name={item.independent_authentication ? 'check' : 'alert'} size={15} /></span><div><strong>{titleCase(item.evidence_type)}</strong><small>{item.value || item.external_reference || item.source} · {item.source}</small></div><StatusBadge value={item.verification_status} label={item.independent_authentication ? 'Independent source' : 'Claim only'} /></div>)}</div> : <p className="empty-inline">No evidence records are available for this event.</p>}
+    </div>
+    {detail.approvals.length ? <div className="approval-record"><div className="subsection-heading"><h3>Homeowner approval</h3><span>{detail.approvals.length} record{detail.approvals.length === 1 ? '' : 's'}</span></div>{detail.approvals.map((approval) => <div className="approval-row" key={approval.id}><StatusBadge value={approval.decision} /><span>{approval.approver} · {titleCase(approval.requested_action)}</span><time>{formatDate(approval.timestamp)}</time></div>)}</div> : null}
+    {detail.actions.length ? <div className="approval-record"><div className="subsection-heading"><h3>Recorded simulated action</h3><span>{detail.actions.length} record{detail.actions.length === 1 ? '' : 's'}</span></div>{detail.actions.map((action) => <div className="action-record" key={action.id}><StatusBadge value={action.execution_mode} label={titleCase(action.execution_mode)} /><div><strong>{titleCase(action.action_type)}</strong><small>{titleCase(action.authorization_check_result)} · {action.result.replace(/_/g, ' ')}</small></div><time>{formatDate(action.timestamp)}</time></div>)}</div> : null}
+    {auditRelated ? <p className="audit-hint"><Icon name="list" size={15} /> Related evidence and approval records are reflected in Evidence & audit.</p> : null}
+    <div className="result-footer"><span><Icon name="shield" size={16} /> No physical access device is controlled by this demo.</span><div>{(decision?.missing_evidence.length || decision?.conflicting_fields.length) ? <button className="button button-secondary" onClick={() => onRequestEvidence(event.id)}><Icon name="search" size={15} /> Request evidence</button> : null}{decision?.policy_decision === 'allow_only_designated_delivery_area' && !detail.actions.length ? <button className="button button-primary" onClick={() => onApprove(event.id)}><Icon name="check" size={15} /> Approve & simulate</button> : null}</div></div>
+  </section>;
+}
+
+function Fact({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return <div className="fact"><span>{label}</span><strong>{value || 'Not provided'}</strong>{detail ? <small>{detail}</small> : null}</div>;
+}
+
+function Comparison({ title, icon, tone, items, empty }: { title: string; icon: string; tone: string; items: string[]; empty: string }) {
+  return <div className={`comparison ${tone}`}><div className="comparison-title"><Icon name={icon} size={15} /><strong>{title}</strong><span>{items.length}</span></div>{items.length ? <ul>{items.map((item) => <li key={item}>{titleCase(item)}</li>)}</ul> : <p>{empty}</p>}</div>;
+}
+
+function AuditPage({ events, auditItems, selectedEventId, detail, onSelect }: { events: EventItem[]; auditItems: AuditItem[]; selectedEventId: string | null; detail: EventDetail | null; onSelect: (id: string) => void }) {
+  const selected = events.find((event) => event.id === selectedEventId) ?? null;
+  const relatedAudit = auditItems.filter((item) => item.event_id === selectedEventId);
+  const allAudit = selectedEventId ? relatedAudit : auditItems;
+  return <>
+    <PageHeading title="Evidence & audit" description="Review recorded evidence and the actions documented by the verification workflow." />
+    <div className="audit-layout">
+      <section className="surface audit-events">
+        <div className="section-heading"><div><h2>Events</h2><p>Select an event to inspect its records.</p></div></div>
+        {events.length ? <div className="history-list">{events.map((event) => <button key={event.id} className={`history-item ${event.id === selectedEventId ? 'selected' : ''}`} onClick={() => onSelect(event.id)}><span className={`history-mark ${outcomeClass(event.processing_status)}`}><Icon name="activity" size={15} /></span><span className="history-copy"><strong>{event.transcript || titleCase(event.event_type)}</strong><small>{formatDate(event.event_timestamp)}</small><StatusBadge value={event.processing_status} /></span><Icon name="chevron" size={15} /></button>)}</div> : <EmptyState icon="activity" title="No event records" text="Run a simulated event to create the first verification record." />}
+      </section>
+      <section className="audit-detail-column">
+        {selected && detail ? <>
+          <div className="surface audit-evidence">
+            <div className="section-heading"><div><h2>Evidence records</h2><p>{formatDate(selected.event_timestamp)}</p></div><StatusBadge value={detail.decision?.outcome || selected.processing_status} /></div>
+            <div className="audit-claim"><span>ORIGINAL VISITOR CLAIM</span><p>{selected.transcript || 'No transcript provided'}</p></div>
+            {detail.evidence.length ? <div className="evidence-list">{detail.evidence.map((item) => <div className="evidence-row" key={item.id}><span className={`evidence-icon ${item.independent_authentication ? 'verified' : 'claim'}`}><Icon name={item.independent_authentication ? 'check' : 'alert'} size={15} /></span><div><strong>{titleCase(item.evidence_type)}</strong><small>{item.value || item.external_reference || 'No value recorded'}</small><small>{item.source} · {formatDate(item.timestamp)}</small></div><StatusBadge value={item.verification_status} label={item.independent_authentication ? 'Independent source' : 'Claim only'} /></div>)}</div> : <p className="empty-inline">No evidence rows are available for this event.</p>}
+            <div className="field-comparison"><Comparison title="Matched" icon="check" tone="positive" items={detail.decision?.matching_fields ?? []} empty="None recorded" /><Comparison title="Conflicts" icon="alert" tone="negative" items={detail.decision?.conflicting_fields ?? []} empty="None recorded" /><Comparison title="Missing" icon="search" tone="warning" items={detail.decision?.missing_evidence ?? []} empty="None reported" /></div>
+            {detail.approvals.length ? <div className="approval-record"><div className="subsection-heading"><h3>Approvals</h3></div>{detail.approvals.map((approval) => <div className="approval-row" key={approval.id}><StatusBadge value={approval.decision} /><span>{approval.approver} · {titleCase(approval.requested_action)}</span><time>{formatDate(approval.timestamp)}</time></div>)}</div> : null}
+            {detail.actions.length ? <div className="approval-record"><div className="subsection-heading"><h3>Recorded simulated action</h3></div>{detail.actions.map((action) => <div className="action-record" key={action.id}><StatusBadge value={action.execution_mode} label={titleCase(action.execution_mode)} /><div><strong>{titleCase(action.action_type)}</strong><small>{titleCase(action.authorization_check_result)} · {action.result.replace(/_/g, ' ')}</small></div><time>{formatDate(action.timestamp)}</time></div>)}</div> : null}
+          </div>
+          <div className="surface audit-trail">
+            <div className="section-heading"><div><h2>Audit history</h2><p>Recorded events for this visitor event.</p></div></div>
+            {allAudit.length ? <div className="timeline">{allAudit.map((item) => <div className="timeline-item" key={item.id}><span className="timeline-marker" /><div className="timeline-copy"><strong>{titleCase(item.event_type)}</strong><p>{typeof item.details === 'string' ? item.details : Object.entries(item.details).map(([key, value]) => `${titleCase(key)}: ${String(value)}`).join(' · ')}</p><small>{item.actor} · {formatDate(item.timestamp)}</small></div></div>)}</div> : <EmptyState icon="list" title="No audit entries for this event" text="Only actions recorded by the backend appear here." />}
+          </div>
+        </> : <section className="surface"><EmptyState icon="list" title="Select a visitor event" text="Evidence details and audit history are loaded from the backend for each event." /></section>}
+      </section>
+    </div>
+  </>;
+}
+
+function IntegrationsPage({ provider, connected, onRefresh }: { provider: ProviderStatus | null; connected: boolean | null; onRefresh: () => void }) {
+  const localMode = provider?.provider_mode === 'local_demo';
+  return <>
+    <PageHeading title="Integrations" description="Check the application’s configured processing mode and service availability." action={<button className="button button-secondary" onClick={onRefresh}><Icon name="refresh" size={16} /> Refresh status</button>} />
+    <section className="surface integration-overview">
+      <div className="integration-banner"><span className="integration-brand"><Icon name="shield" size={22} /></span><div><span className="form-section-label">CURRENT PROCESSING MODE</span><h2>{localMode ? 'Local demo active' : titleCase(provider?.provider_mode)}</h2><p>{provider?.provider_summary || 'Provider status has not loaded.'}</p></div><StatusBadge value={localMode ? 'ready' : provider?.provider_configured ? 'configured' : 'missing'} label={localMode ? 'Deterministic rules' : provider?.provider_configured ? 'Configured' : 'Not configured'} /></div>
+      <div className="integration-grid">
+        <IntegrationCard icon="activity" title="Backend API" status={connected === true ? 'Connection verified' : connected === false ? 'Connection check failed' : 'Checking connection'} tone={connected === true ? 'positive' : connected === false ? 'negative' : 'neutral'} text={connected === true ? 'Health endpoint responded successfully.' : connected === false ? 'The health endpoint did not respond successfully.' : 'Waiting for the health endpoint.'} />
+        <IntegrationCard icon="spark" title="Amazon Bedrock" status={provider?.bedrock === 'configured' ? 'Configured, not live-tested' : 'Provider not configured'} tone={provider?.bedrock === 'configured' ? 'warning' : 'neutral'} text={provider?.bedrock === 'configured' ? 'Credentials are present; live model access is not verified by this status endpoint.' : 'Bedrock is optional. This deployment is using local deterministic processing.'} />
+        <IntegrationCard icon="activity" title="Ring activity" status="Simulated" tone="warning" text="Visitor activity comes from the in-app simulator; no Ring account is connected." />
+        <IntegrationCard icon="lock" title="Physical actions" status="Not available" tone="neutral" text="The workflow can record an explicitly approved simulated action. No lock or physical device is operated." />
+        <IntegrationCard icon="nodes" title="MCP server" status="Not hosted here" tone="neutral" text="The Streamable HTTP MCP server runs separately; this Vercel deployment does not verify its availability." />
+      </div>
+    </section>
+    <section className="surface mode-explainer"><span className="explainer-icon"><Icon name="shield" size={19} /></span><div><h3>Verification remains the trust boundary</h3><p>Visitor statements are treated as claims. GuestVerify compares those claims with expected deliveries and available evidence; a model response or matching description does not authorize access. Vercel’s demo database is ephemeral and is not suitable for persistent operational records.</p></div></section>
+  </>;
+}
+
+function IntegrationCard({ icon, title, status, tone, text }: { icon: string; title: string; status: string; tone: string; text: string }) {
+  return <article className="integration-card"><div className="integration-card-top"><span className="integration-icon"><Icon name={icon} size={18} /></span><StatusBadge value={tone} label={status} /></div><h3>{title}</h3><p>{text}</p></article>;
+}
+
+export default App;
