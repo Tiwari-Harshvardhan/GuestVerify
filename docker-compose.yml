@@ -1,0 +1,31 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: sqlite:////data/guestverify.db
+      APP_ENV: demo
+      DEMO_OWNER_ID: demo-owner
+      SECRET_KEY: guestverify-demo-secret
+      AWS_REGION: us-east-1
+      AWS_MODEL_ID: us.amazon.nova-lite-v1:0
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      BACKEND_PORT: 8000
+      MCP_PORT: 8001
+    volumes:
+      - backend-data:/data
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  backend-data:
