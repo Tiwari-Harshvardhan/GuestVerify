@@ -94,8 +94,16 @@ The Vercel setup is for demonstration only. Its SQLite database is stored under 
 
 This remains a simulated delivery workflow and does not unlock a real door or operate a physical device.
 
+## Audio and perimeter demo
+
+- Use **Audio & responses** to type a visitor response or preview it with the current browser's speech synthesis. The generated doorbell sample also plays locally in the browser; it is not sent to a doorbell or other device.
+- Speech-to-text is opt-in and starts only after selecting **Start listening**. Browser support varies, and the browser's speech-recognition service may process audio online. GuestVerify does not upload or store microphone audio. Permission status and unsupported/denied states are shown in the interface; typing remains available.
+- When a visitor response preview is started, its text and the `browser_speech_synthesis` channel are recorded in the event audit. No audio is recorded.
+- Use **Perimeter awareness** to create a clearly labeled simulated front-door event. The illustration is informational: driveway and side-entrance zones are not connected sensors, and GuestVerify does not provide continuous or autonomous monitoring.
+
 ## Limitations
 
 - Local mode is deterministic and should be presented as demo logic rather than a live LLM result.
 - Real Bedrock calls require the live AWS environment and permission model to be configured.
 - Docker runtime validation requires a working local Docker daemon.
+- Browser speech recognition and synthesis availability depends on the browser and its permissions.

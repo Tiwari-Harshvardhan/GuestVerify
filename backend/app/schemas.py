@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DeliveryExpectationCreate(BaseModel):
@@ -51,6 +51,10 @@ class ActionRequest(BaseModel):
 
 class AssistantChatRequest(BaseModel):
     message: str
+
+
+class VisitorResponsePreviewRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=500)
 
 
 class AssistantChatResponse(BaseModel):

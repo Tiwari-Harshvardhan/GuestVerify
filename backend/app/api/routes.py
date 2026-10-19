@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import DEMO_OWNER_ID
 from app.database import get_db
 from app.models import ActionRecord, AuditRecord, DeliveryExpectation, EvidenceItem, HomeownerApproval, VerificationDecision, VisitorEvent
-from app.schemas import ActionRequest, AssistantChatRequest, AssistantChatResponse, DeliveryExpectationCreate, DeliveryExpectationRead, HealthResponse, HomeownerApprovalCreate, IntegrationStatus
+from app.schemas import ActionRequest, AssistantChatRequest, AssistantChatResponse, DeliveryExpectationCreate, DeliveryExpectationRead, HealthResponse, HomeownerApprovalCreate, IntegrationStatus, VisitorResponsePreviewRequest
 from app.services.action_service import approve_request, deny_request, execute_simulated_action
 from app.services.audit_service import list_audit
 from app.services.bedrock_service import BedrockService
@@ -232,6 +232,29 @@ def request_evidence_event(event_id: str, db: Session = Depends(get_db), x_demo_
     ))
     db.commit()
     return {"status": "requested_evidence", "event_id": event_id}
+
+
+@router.post("/api/events/{event_id}/response-preview")
+def record_visitor_response_preview(
+    event_id: str,
+    payload: VisitorResponsePreviewRequest,
+    db: Session = Depends(get_db),
+    x_demo_owner: str | None = Header(default=None, alias="X-Demo-Owner"),
+):
+    if x_demo_owner not in {DEMO_OWNER_ID, "demo-owner"}:
+        raise HTTPException(status_code=401, detail="Unauthorized; demo owner required")
+    if not db.query(VisitorEvent.id).filter(VisitorEvent.id == event_id).first():
+        raise HTTPException(status_code=404, detail="Event not found")
+    db.add(AuditRecord(
+        id=str(uuid.uuid4()),
+        event_id=event_id,
+        correlation_id=str(uuid.uuid4()),
+        actor="homeowner",
+        event_type="local_response_preview",
+        details=json.dumps({"channel": "browser_speech_synthesis", "message": payload.message}),
+    ))
+    db.commit()
+    return {"status": "recorded", "event_id": event_id, "channel": "browser_speech_synthesis"}
 
 
 @router.get("/api/audit")

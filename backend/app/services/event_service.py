@@ -1,6 +1,6 @@
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -20,6 +20,8 @@ class EventProcessor:
         event_ts = payload.get("event_timestamp") or datetime.utcnow()
         if isinstance(event_ts, str):
             event_ts = datetime.fromisoformat(event_ts.replace("Z", "+00:00"))
+        if event_ts.tzinfo is not None:
+            event_ts = event_ts.astimezone(timezone.utc).replace(tzinfo=None)
         event = VisitorEvent(
             id=event_id,
             event_type=payload["event_type"],
@@ -32,7 +34,6 @@ class EventProcessor:
             correlation_id=correlation_id,
         )
         self.db.add(event)
-        self.db.commit()
 
         claim = ProviderService().extract_visitor_claim(payload.get("transcript") or "")
         delivery_candidates = self.db.query(DeliveryExpectation).all()

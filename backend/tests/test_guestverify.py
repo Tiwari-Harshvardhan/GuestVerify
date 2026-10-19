@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -37,6 +37,33 @@ def test_event_simulation_and_verification():
     data = response.json()
     assert 'decision' in data
     assert data['decision']['outcome'] in {'PARTIAL_MATCH', 'NO_EXPECTED_DELIVERY'}
+
+
+def test_event_simulation_normalizes_timezone_aware_timestamp():
+    response = client.post('/api/events/simulate', json={
+        'event_type': 'manual_simulation',
+        'device_id': 'timezone-aware-event',
+        'transcript': 'Amazon delivery for John.',
+        'source': 'perimeter_simulator',
+        'event_timestamp': datetime.now(timezone.utc).isoformat(),
+    })
+    assert response.status_code == 200, response.text
+    event = client.get(f"/api/events/{response.json()['event_id']}").json()['event']
+    assert datetime.fromisoformat(event['event_timestamp']).tzinfo is None
+
+
+def test_failed_event_processing_does_not_persist_partial_event():
+    event_count_before = len(client.get('/api/events').json())
+    with patch('app.services.event_service.compare_claim_to_delivery', side_effect=RuntimeError('verification failed')):
+        with TestClient(app, raise_server_exceptions=False) as failing_client:
+            response = failing_client.post('/api/events/simulate', json={
+                'event_type': 'manual_simulation',
+                'device_id': 'failed-event',
+                'transcript': 'Amazon delivery for John.',
+                'source': 'simulator',
+            })
+    assert response.status_code == 500
+    assert len(client.get('/api/events').json()) == event_count_before
 
 
 def test_action_requires_approval():
@@ -199,3 +226,65 @@ def test_dashboard_review_count_and_event_action_history():
     assert detail['actions'][0]['execution_mode'] == 'simulated'
     assert 'no_physical_lock_touched' in detail['actions'][0]['result']
     assert client.get('/api/dashboard').json()['pending_approvals'] == pending_before
+
+
+def test_response_preview_is_owner_gated_and_audited():
+    event_response = client.post('/api/events/simulate', json={
+        'event_type': 'delivery_arrival',
+        'device_id': 'response-preview-doorbell',
+        'transcript': 'Amazon delivery for John.',
+        'source': 'simulator',
+        'event_timestamp': datetime.utcnow().isoformat(),
+    })
+    event_id = event_response.json()['event_id']
+    payload = {'message': 'Please wait while I check the expected delivery.'}
+
+    unauthorized = client.post(f'/api/events/{event_id}/response-preview', json=payload)
+    assert unauthorized.status_code == 401
+
+    recorded = client.post(
+        f'/api/events/{event_id}/response-preview',
+        json=payload,
+        headers={'X-Demo-Owner': 'demo-owner'},
+    )
+    assert recorded.status_code == 200
+    assert recorded.json()['channel'] == 'browser_speech_synthesis'
+    audit = client.get('/api/audit').json()
+    entry = next(item for item in audit if item['event_type'] == 'local_response_preview')
+    assert entry['event_id'] == event_id
+    assert entry['details']['message'] == payload['message']
+    assert entry['details']['channel'] == 'browser_speech_synthesis'
+
+
+def test_response_preview_rejects_unknown_event():
+    response = client.post(
+        '/api/events/not-a-real-event/response-preview',
+        json={'message': 'Please wait while I check.'},
+        headers={'X-Demo-Owner': 'demo-owner'},
+    )
+    assert response.status_code == 404
+
+
+def test_response_preview_rejects_empty_or_oversized_message():
+    event_response = client.post('/api/events/simulate', json={
+        'event_type': 'delivery_arrival',
+        'device_id': 'response-preview-validation',
+        'transcript': 'Amazon delivery for John.',
+        'source': 'simulator',
+        'event_timestamp': datetime.utcnow().isoformat(),
+    })
+    event_id = event_response.json()['event_id']
+    headers = {'X-Demo-Owner': 'demo-owner'}
+
+    empty = client.post(
+        f'/api/events/{event_id}/response-preview',
+        json={'message': ''},
+        headers=headers,
+    )
+    oversized = client.post(
+        f'/api/events/{event_id}/response-preview',
+        json={'message': 'x' * 501},
+        headers=headers,
+    )
+    assert empty.status_code == 422
+    assert oversized.status_code == 422

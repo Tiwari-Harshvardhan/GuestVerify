@@ -1,4 +1,5 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createSpeechRecognition, playLocalDoorbell, speakLocally, stopLocalSpeech, supportsSpeechRecognition, supportsSpeechSynthesis, type SpeechRecognitionLike } from './speech';
 
 type Delivery = {
   id: string;
@@ -94,7 +95,8 @@ type ProviderStatus = {
   provider_summary: string;
 };
 
-type Section = 'overview' | 'deliveries' | 'events' | 'audit' | 'integrations';
+type Section = 'overview' | 'events' | 'deliveries' | 'audio' | 'perimeter' | 'audit' | 'integrations';
+type AudioLogEntry = { id: string; timestamp: string; title: string; detail: string; source: 'simulated event' | 'homeowner action' | 'browser audio' };
 
 const API = '';
 const emptyForm = () => ({
@@ -117,9 +119,11 @@ const scenarios = [
 
 const navItems: Array<{ id: Section; label: string; icon: string }> = [
   { id: 'overview', label: 'Overview', icon: 'grid' },
-  { id: 'deliveries', label: 'Deliveries', icon: 'box' },
   { id: 'events', label: 'Visitor events', icon: 'activity' },
-  { id: 'audit', label: 'Evidence & audit', icon: 'list' },
+  { id: 'deliveries', label: 'Deliveries', icon: 'box' },
+  { id: 'audio', label: 'Audio & responses', icon: 'speaker' },
+  { id: 'perimeter', label: 'Perimeter awareness', icon: 'home' },
+  { id: 'audit', label: 'Audit history', icon: 'list' },
   { id: 'integrations', label: 'Integrations', icon: 'nodes' },
 ];
 
@@ -143,6 +147,15 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     chevron: <path d="m9 18 6-6-6-6" />,
     lock: <><rect x="5" y="10" width="14" height="11" rx="2" /><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2" /></>,
     spark: <><path d="m12 3 1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3Z" /><path d="m19 16 .8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16Z" /></>,
+    mic: <><rect x="9" y="3" width="6" height="12" rx="3" /><path d="M5 11a7 7 0 0 0 14 0m-7 7v3m-4 0h8" /></>,
+    speaker: <><path d="M4 10v4h4l5 4V6l-5 4H4Z" /><path d="M17 9a5 5 0 0 1 0 6m2-9a9 9 0 0 1 0 12" /></>,
+    stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
+    play: <path d="m8 5 11 7-11 7V5Z" />,
+    home: <><path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1V10Z" /><path d="M7 11h.01M17 11h.01" /></>,
+    car: <><path d="m5 11 1.5-5h11L19 11l2 2v5h-2v-2H5v2H3v-5l2-2Z" /><path d="M6.5 6 5 11h14l-1.5-5M6 13h.01M18 13h.01" /></>,
+    door: <><path d="M5 21V4a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v17M3 21h18M14 12h.01" /></>,
+    porch: <><path d="M3 11 12 4l9 7M5 10v10h14V10M3 20h18M9 20v-6h6v6" /></>,
+    dot: <circle cx="12" cy="12" r="3" />,
   };
   return <svg {...shared}>{paths[name] ?? paths.alert}</svg>;
 }
@@ -194,6 +207,24 @@ function App() {
   const [assistantLoading, setAssistantLoading] = useState(false);
   const [showDeliveryForm, setShowDeliveryForm] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [visitorResponse, setVisitorResponse] = useState('Please wait while I check the expected delivery.');
+  const [voiceQuestion, setVoiceQuestion] = useState('');
+  const [audioLog, setAudioLog] = useState<AudioLogEntry[]>([]);
+  const [listening, setListening] = useState(false);
+  const [microphoneState, setMicrophoneState] = useState<'idle' | 'requesting' | 'listening' | 'denied' | 'error' | 'unsupported'>('idle');
+  const [microphonePermission, setMicrophonePermission] = useState<'not-requested' | 'granted' | 'denied' | 'unknown'>('not-requested');
+  const [audioBusy, setAudioBusy] = useState(false);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+
+  const addAudioLog = useCallback((title: string, detail: string, source: AudioLogEntry['source']) => {
+    setAudioLog((current) => [{
+      id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      timestamp: new Date().toISOString(),
+      title,
+      detail,
+      source,
+    }, ...current].slice(0, 20));
+  }, []);
 
   const request = useCallback(async (path: string, init?: RequestInit) => {
     const response = await fetch(`${API}${path}`, init);
@@ -244,6 +275,11 @@ function App() {
     else setEventDetail(null);
   }, [selectedEventId, loadEventDetail]);
 
+  useEffect(() => () => {
+    recognitionRef.current?.abort();
+    stopLocalSpeech();
+  }, []);
+
   const selectedEvent = useMemo(() => events.find((event) => event.id === selectedEventId) ?? null, [events, selectedEventId]);
   const selectedDelivery = useMemo(() => {
     const id = eventDetail?.event.delivery_id ?? selectedEvent?.delivery_id;
@@ -256,6 +292,10 @@ function App() {
     .slice(0, 5), [deliveries]);
   const recentEvents = events.slice(0, 6);
   const pageTitle = navItems.find((item) => item.id === section)?.label ?? 'Overview';
+  const speechRecognitionSupported = supportsSpeechRecognition();
+  const speechSynthesisSupported = supportsSpeechSynthesis();
+  const audioContextSupported = typeof window.AudioContext !== 'undefined';
+  const perimeterEvents = events.filter((item) => item.source === 'perimeter_simulator' || item.device_id === 'perimeter-front-door-demo');
 
   const clearFeedback = () => {
     setError('');
@@ -283,7 +323,11 @@ function App() {
         }),
       });
       await loadData();
-      if (result.event_id) setSelectedEventId(result.event_id);
+      if (result.event_id) {
+        setSelectedEventId(result.event_id);
+        addAudioLog('Visitor claim received', transcript.trim(), 'simulated event');
+        addAudioLog('Verification completed', titleCase(result.decision?.outcome), 'simulated event');
+      }
       setNotice('Event analyzed. Review the evidence and recommendation below; a visitor’s claim is not identity proof.');
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'The event could not be analyzed.');
@@ -373,22 +417,180 @@ function App() {
     }
   };
 
-  const askAssistant = async (event: FormEvent) => {
+  const askAssistant = async (event: FormEvent, messageInput = assistantInput) => {
     event.preventDefault();
-    if (!assistantInput.trim()) return;
+    if (!messageInput.trim()) return;
     clearFeedback();
     setAssistantLoading(true);
     try {
       const data = await request('/api/assistant/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: assistantInput.trim() }),
+        body: JSON.stringify({ message: messageInput.trim() }),
       });
       setAssistantResponse(data.response || 'No response was returned.');
+      addAudioLog('Assistant response received', data.response || 'No response was returned.', 'homeowner action');
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'The assistant is unavailable.');
     } finally {
       setAssistantLoading(false);
+    }
+  };
+
+  const startMicrophone = () => {
+    clearFeedback();
+    if (!supportsSpeechRecognition()) {
+      setMicrophoneState('unsupported');
+      setMicrophonePermission('unknown');
+      setError('Speech recognition is not supported in this browser. You can still type your question.');
+      return;
+    }
+    const recognition = createSpeechRecognition();
+    if (!recognition) {
+      setMicrophoneState('unsupported');
+      return;
+    }
+    recognitionRef.current?.abort();
+    recognitionRef.current = recognition;
+    setMicrophoneState('requesting');
+    recognition.onstart = () => {
+      setListening(true);
+      setMicrophoneState('listening');
+      setMicrophonePermission('granted');
+    };
+    recognition.onresult = (event) => {
+      const parts: string[] = [];
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        if (result.isFinal) parts.push(result[0].transcript.trim());
+      }
+      if (parts.length) {
+        const transcriptText = parts.join(' ');
+        setVoiceQuestion((current) => `${current}${current ? ' ' : ''}${transcriptText}`);
+        addAudioLog('Speech transcribed', transcriptText, 'homeowner action');
+      }
+    };
+    recognition.onerror = (event) => {
+      setListening(false);
+      if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+        setMicrophoneState('denied');
+        setMicrophonePermission('denied');
+        setError('Microphone permission was denied. Enable microphone access in your browser settings or type your question.');
+      } else if (event.error === 'audio-capture') {
+        setMicrophoneState('error');
+        setMicrophonePermission('unknown');
+        setError('No microphone is available. Connect a microphone or type your question.');
+      } else if (event.error !== 'aborted' && event.error !== 'no-speech') {
+        setMicrophoneState('error');
+        setError(`Speech recognition stopped: ${event.error}. You can type your question instead.`);
+      }
+    };
+    recognition.onend = () => {
+      setListening(false);
+      setMicrophoneState((current) => current === 'listening' || current === 'requesting' ? 'idle' : current);
+    };
+    try {
+      recognition.start();
+    } catch {
+      setListening(false);
+      setMicrophoneState('error');
+      setError('The microphone could not be started. Try again or type your question.');
+    }
+  };
+
+  const stopMicrophone = () => {
+    recognitionRef.current?.stop();
+    setListening(false);
+    setMicrophoneState('idle');
+  };
+
+  const askVoiceQuestion = async (event: FormEvent) => {
+    event.preventDefault();
+    const message = voiceQuestion.trim();
+    if (!message) return;
+    setAssistantInput(message);
+    await askAssistant(event, message);
+  };
+
+  const previewSpeech = (text: string, kind: 'response' | 'summary' = 'response') => {
+    clearFeedback();
+    if (!text.trim()) {
+      setError('Enter a message before previewing speech.');
+      return;
+    }
+    const started = speakLocally(text, {
+      onEnd: () => addAudioLog(kind === 'response' ? 'Speech preview completed' : 'Summary read aloud', text, 'browser audio'),
+      onError: (message) => setError(message),
+    });
+    if (!started) return;
+    addAudioLog(kind === 'response' ? 'Speech preview started' : 'Summary playback started', text, 'browser audio');
+  };
+
+  const previewVisitorResponse = async () => {
+    if (!selectedEventId) {
+      setError('Select a visitor event before preparing a visitor response.');
+      return;
+    }
+    const message = visitorResponse.trim();
+    if (!message) {
+      setError('Write a response before playing the local preview.');
+      return;
+    }
+    clearFeedback();
+    const started = speakLocally(message, { onError: (message) => setError(message) });
+    if (!started) return;
+    addAudioLog('Response preview started', message, 'browser audio');
+    try {
+      await request(`/api/events/${selectedEventId}/response-preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Demo-Owner': 'demo-owner' },
+        body: JSON.stringify({ message }),
+      });
+      setNotice('Local audio preview started on this device; no sound was sent to the doorbell.');
+      await loadData();
+    } catch (requestError) {
+      stopLocalSpeech();
+      setError(requestError instanceof Error ? requestError.message : 'The response preview could not be audited.');
+    }
+  };
+
+  const playDoorbellSample = async () => {
+    clearFeedback();
+    setAudioBusy(true);
+    try {
+      await playLocalDoorbell();
+      addAudioLog('Doorbell sample played', 'Two-tone sample generated locally in this browser.', 'browser audio');
+      setNotice('Doorbell sample played locally. This did not represent a real sensor event.');
+    } catch (playbackError) {
+      setError(playbackError instanceof Error ? playbackError.message : 'The doorbell sample could not be played.');
+    } finally {
+      setAudioBusy(false);
+    }
+  };
+
+  const simulatePerimeterEvent = async () => {
+    clearFeedback();
+    setLoading(true);
+    try {
+      const result = await request('/api/events/simulate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event_type: 'manual_simulation',
+          device_id: 'perimeter-front-door-demo',
+          transcript: 'Visitor approached front door.',
+          source: 'perimeter_simulator',
+          event_timestamp: new Date().toISOString(),
+        }),
+      });
+      await loadData();
+      if (result.event_id) setSelectedEventId(result.event_id);
+      addAudioLog('Perimeter event simulated', 'Visitor approached front door. No connected sensor was used.', 'simulated event');
+      setNotice('Simulated front-door activity was added to the visitor event history.');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'The perimeter event could not be simulated.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -457,6 +659,7 @@ function App() {
               onNavigate={navigate}
               onSelectEvent={(id) => { setSelectedEventId(id); navigate('events'); }}
               onSimulate={() => navigate('events')}
+              perimeterEvents={perimeterEvents}
             />
           ) : null}
           {section === 'deliveries' ? (
@@ -488,10 +691,46 @@ function App() {
               onRequestEvidence={requestEvidence}
             />
           ) : null}
+          {section === 'audio' ? (
+            <AudioPage
+              selectedEvent={selectedEvent}
+              detail={eventDetail}
+              response={visitorResponse}
+              onResponse={setVisitorResponse}
+              onResponseComposed={(text) => addAudioLog('Visitor response composed', text, 'homeowner action')}
+              onPreviewResponse={previewVisitorResponse}
+              onPlayDoorbell={playDoorbellSample}
+              audioBusy={audioBusy}
+              microphoneState={microphoneState}
+              microphonePermission={microphonePermission}
+              listening={listening}
+              speechRecognitionSupported={speechRecognitionSupported}
+              speechSynthesisSupported={speechSynthesisSupported}
+              question={voiceQuestion}
+              onQuestion={setVoiceQuestion}
+              onStartMicrophone={startMicrophone}
+              onStopMicrophone={stopMicrophone}
+              onAskAssistant={askVoiceQuestion}
+              assistantLoading={assistantLoading}
+              assistantResponse={assistantResponse}
+              onReadSummary={() => previewSpeech(assistantResponse || 'No assistant response is available yet.', 'summary')}
+              onReadEventSummary={() => previewSpeech(eventDetail?.decision ? `${eventDetail.decision.outcome}. ${eventDetail.decision.explanation} Recommended action: ${titleCase(eventDetail.decision.recommended_action)}.` : 'No visitor summary is available yet.', 'summary')}
+              log={audioLog}
+              onOpenEvents={() => navigate('events')}
+            />
+          ) : null}
+          {section === 'perimeter' ? (
+            <PerimeterPage
+              events={events}
+              loading={loading}
+              onSimulate={simulatePerimeterEvent}
+              onSelectEvent={(id) => { setSelectedEventId(id); navigate('events'); }}
+            />
+          ) : null}
           {section === 'audit' ? (
             <AuditPage events={events} auditItems={auditItems} selectedEventId={selectedEventId} detail={eventDetail} onSelect={setSelectedEventId} />
           ) : null}
-          {section === 'integrations' ? <IntegrationsPage provider={providerStatus} connected={backendConnected} onRefresh={() => loadData().catch((e: unknown) => setError(e instanceof Error ? e.message : 'Refresh failed.'))} /> : null}
+          {section === 'integrations' ? <IntegrationsPage provider={providerStatus} connected={backendConnected} speechRecognitionSupported={speechRecognitionSupported} speechSynthesisSupported={speechSynthesisSupported} audioContextSupported={audioContextSupported} onRefresh={() => loadData().catch((e: unknown) => setError(e instanceof Error ? e.message : 'Refresh failed.'))} /> : null}
         </main>
       </div>
     </div>
@@ -502,7 +741,7 @@ function PageHeading({ title, description, action }: { title: string; descriptio
   return <div className="page-heading"><div><h1>{title}</h1><p>{description}</p></div>{action}</div>;
 }
 
-function Overview({ summary, activeDeliveries, readinessDeliveries, events, deliveries, assistantInput, assistantResponse, assistantLoading, onAssistantInput, onAskAssistant, onNavigate, onSelectEvent, onSimulate }: {
+function Overview({ summary, activeDeliveries, readinessDeliveries, events, deliveries, assistantInput, assistantResponse, assistantLoading, onAssistantInput, onAskAssistant, onNavigate, onSelectEvent, onSimulate, perimeterEvents }: {
   summary: DashboardSummary | null;
   activeDeliveries: Delivery[];
   readinessDeliveries: Delivery[];
@@ -516,6 +755,7 @@ function Overview({ summary, activeDeliveries, readinessDeliveries, events, deli
   onNavigate: (section: Section) => void;
   onSelectEvent: (id: string) => void;
   onSimulate: () => void;
+  perimeterEvents: EventItem[];
 }) {
   const metrics = [
     { label: 'Visitor events', value: summary?.total_events ?? '—', tone: 'blue', note: 'Recorded activity' },
@@ -569,6 +809,14 @@ function Overview({ summary, activeDeliveries, readinessDeliveries, events, deli
           <button className="button button-secondary" type="submit" disabled={assistantLoading}>{assistantLoading ? 'Asking…' : 'Ask'}</button>
         </form>
         {assistantResponse ? <p className="assistant-response">{assistantResponse}</p> : <p className="assistant-disclaimer">Answers summarize recorded demo data. They do not authorize an action.</p>}
+      </section>
+      <section className="surface overview-perimeter">
+        <div className="section-heading"><div><h2>Perimeter awareness</h2><p>Simulated events only · no connected sensors</p></div><button className="text-button" onClick={() => onNavigate('perimeter')}>View zones <Icon name="arrow" size={15} /></button></div>
+        <div className="overview-perimeter-row">
+          <span className="zone-mini-icon"><Icon name="home" size={17} /></span>
+          <span><strong>{perimeterEvents.length ? `${perimeterEvents.length} simulated front-door ${perimeterEvents.length === 1 ? 'event' : 'events'}` : 'No recent simulated activity'}</strong><small>Front door · illustrative zone</small></span>
+          {perimeterEvents[0] ? <StatusBadge value={perimeterEvents[0].processing_status} /> : <StatusBadge value="neutral" label="No sensor connected" />}
+        </div>
       </section>
       <section className="principle-strip"><Icon name="shield" size={19} /><span><strong>Verify the delivery, not just the visitor’s story.</strong> A matching claim may inform a decision, but it does not prove identity or authorize physical access.</span></section>
     </>
@@ -725,7 +973,7 @@ function AuditPage({ events, auditItems, selectedEventId, detail, onSelect }: { 
   const relatedAudit = auditItems.filter((item) => item.event_id === selectedEventId);
   const allAudit = selectedEventId ? relatedAudit : auditItems;
   return <>
-    <PageHeading title="Evidence & audit" description="Review recorded evidence and the actions documented by the verification workflow." />
+    <PageHeading title="Audit history" description="Review recorded evidence and the actions documented by the verification workflow." />
     <div className="audit-layout">
       <section className="surface audit-events">
         <div className="section-heading"><div><h2>Events</h2><p>Select an event to inspect its records.</p></div></div>
@@ -751,7 +999,143 @@ function AuditPage({ events, auditItems, selectedEventId, detail, onSelect }: { 
   </>;
 }
 
-function IntegrationsPage({ provider, connected, onRefresh }: { provider: ProviderStatus | null; connected: boolean | null; onRefresh: () => void }) {
+const responseSuggestions = [
+  'Please state the delivery company and tracking reference.',
+  'Please wait while I check the expected delivery.',
+  'I cannot confirm this delivery yet. Please leave the package at the designated location.',
+  'Thank you. Your delivery details are being checked.',
+];
+
+function AudioPage({ selectedEvent, detail, response, onResponse, onResponseComposed, onPreviewResponse, onPlayDoorbell, audioBusy, microphoneState, microphonePermission, listening, speechRecognitionSupported, speechSynthesisSupported, question, onQuestion, onStartMicrophone, onStopMicrophone, onAskAssistant, assistantLoading, assistantResponse, onReadSummary, onReadEventSummary, log, onOpenEvents }: {
+  selectedEvent: EventItem | null;
+  detail: EventDetail | null;
+  response: string;
+  onResponse: (text: string) => void;
+  onResponseComposed: (text: string) => void;
+  onPreviewResponse: () => void;
+  onPlayDoorbell: () => void;
+  audioBusy: boolean;
+  microphoneState: 'idle' | 'requesting' | 'listening' | 'denied' | 'error' | 'unsupported';
+  microphonePermission: 'not-requested' | 'granted' | 'denied' | 'unknown';
+  listening: boolean;
+  speechRecognitionSupported: boolean;
+  speechSynthesisSupported: boolean;
+  question: string;
+  onQuestion: (text: string) => void;
+  onStartMicrophone: () => void;
+  onStopMicrophone: () => void;
+  onAskAssistant: (event: FormEvent) => void;
+  assistantLoading: boolean;
+  assistantResponse: string;
+  onReadSummary: () => void;
+  onReadEventSummary: () => void;
+  log: AudioLogEntry[];
+  onOpenEvents: () => void;
+}) {
+  const microphoneMessage = microphoneState === 'denied'
+    ? 'Microphone permission denied. You can change this in your browser site settings.'
+    : microphoneState === 'error'
+      ? 'Microphone could not be started. Check the connected device or type your question.'
+      : microphoneState === 'unsupported' || !speechRecognitionSupported
+        ? 'Speech-to-text is not supported in this browser. Typing remains available.'
+        : 'Speech recognition is provided by your browser and may use an online service. GuestVerify does not receive microphone audio.';
+  const permissionLabel = microphonePermission === 'not-requested'
+    ? 'Permission not requested'
+    : microphonePermission === 'granted'
+      ? 'Browser granted microphone access'
+      : microphonePermission === 'denied'
+        ? 'Microphone permission denied'
+        : 'Permission state unavailable';
+  return <>
+    <PageHeading title="Audio & responses" description="Speak with the assistant, prepare a response, or preview sounds locally." />
+    <section className="audio-disclosure"><Icon name="shield" size={17} /><span>Microphone use starts only when you press Listen. Speech recognition may be processed by your browser’s online service. Audio is not uploaded to GuestVerify; playback uses this device, never a doorbell speaker.</span></section>
+    <div className="audio-grid">
+      <div className="audio-main-column">
+        <section className="surface voice-assistant">
+          <div className="section-heading"><div className="simulator-title"><span className="simulator-icon"><Icon name="mic" size={18} /></span><div><h2>Voice assistant</h2><p>Ask about the latest recorded visitor activity.</p></div></div><StatusBadge value={speechRecognitionSupported ? 'ready' : 'warning'} label={speechRecognitionSupported ? 'Browser speech input available' : 'Type to speak'} /></div>
+          <div className={`microphone-state ${listening ? 'is-listening' : ''}`} aria-live="polite"><span className="microphone-state-dot" /><strong>{permissionLabel}</strong><span>{listening ? 'Listening… speak now, then stop when finished.' : microphoneMessage}</span></div>
+          <form onSubmit={onAskAssistant}>
+            <label className="field" htmlFor="voice-question"><span>Your question</span><textarea id="voice-question" rows={3} value={question} onChange={(event) => onQuestion(event.target.value)} placeholder="Ask what happened, what matched, or what evidence is missing…" /></label>
+            <div className="audio-controls">
+              {listening ? <button type="button" className="button button-danger" onClick={onStopMicrophone}><Icon name="stop" size={15} /> Stop listening</button> : <button type="button" className="button button-secondary" onClick={onStartMicrophone} disabled={!speechRecognitionSupported}><Icon name="mic" size={15} /> {microphoneState === 'requesting' ? 'Requesting permission…' : 'Listen'}</button>}
+              <button className="button button-primary" type="submit" disabled={assistantLoading || !question.trim()}>{assistantLoading ? <><span className="spinner" /> Asking…</> : 'Ask GuestVerify'}</button>
+            </div>
+          </form>
+          {assistantResponse ? <div className="spoken-summary"><div><span className="subsection-heading"><h3>Assistant response</h3></span><p>{assistantResponse}</p></div><button type="button" className="button button-secondary" onClick={onReadSummary} disabled={!speechSynthesisSupported}><Icon name="speaker" size={15} /> Read aloud</button></div> : null}
+        </section>
+        <section className="surface visitor-communication">
+          <div className="section-heading"><div><h2>Speak to the visitor</h2><p>Prepare a polite verification prompt for local playback.</p></div><StatusBadge value={selectedEvent ? 'ready' : 'neutral'} label={selectedEvent ? 'Event selected' : 'Select an event'} /></div>
+          {selectedEvent ? <div className="visitor-claim-strip"><span className="claim-icon"><Icon name="activity" size={16} /></span><div><small>VISITOR CLAIM</small><strong>{selectedEvent.transcript || 'No transcript provided'}</strong></div><button type="button" className="text-button" onClick={onOpenEvents}>View event <Icon name="arrow" size={14} /></button></div> : <div className="audio-empty-link"><span>No visitor event selected.</span><button className="text-button" onClick={onOpenEvents}>Open visitor events <Icon name="arrow" size={14} /></button></div>}
+          <label className="field visitor-message-field"><span>Response message <small>Editable before playback</small></span><textarea rows={3} value={response} onChange={(event) => onResponse(event.target.value)} onBlur={() => { if (response.trim()) onResponseComposed(response.trim()); }} placeholder="Write a calm response…" /></label>
+          <div className="response-suggestions"><span>Suggested responses</span>{responseSuggestions.map((suggestion) => <button key={suggestion} type="button" className={`response-suggestion ${response === suggestion ? 'selected' : ''}`} onClick={() => { onResponse(suggestion); onResponseComposed(suggestion); }}>{suggestion}</button>)}</div>
+          <div className="visitor-response-footer"><span><Icon name="speaker" size={15} /> Local preview only · plays through this device</span><button className="button button-primary" onClick={onPreviewResponse} disabled={!selectedEvent || !speechSynthesisSupported || !response.trim()}><Icon name="play" size={14} /> Preview spoken response</button></div>
+        </section>
+      </div>
+      <aside className="audio-side-column">
+        <section className="surface sound-sample">
+          <div className="section-heading"><div><h2>Doorbell sound sample</h2><p>Generated in your browser</p></div><span className="sample-icon"><Icon name="speaker" size={17} /></span></div>
+          <p>A short two-tone sample. Playing it does not create a sensor event or record audio.</p>
+          <button className="button button-secondary sound-button" onClick={onPlayDoorbell} disabled={audioBusy}><Icon name="play" size={14} />{audioBusy ? 'Playing sample…' : 'Play local sample'}</button>
+        </section>
+        <section className="surface current-event-audio">
+          <div className="section-heading"><div><h2>Current event summary</h2><p>Backend verification result</p></div></div>
+          {selectedEvent && detail?.decision ? <><StatusBadge value={detail.decision.outcome} /><p>{detail.decision.explanation}</p><small>Recommended: {titleCase(detail.decision.recommended_action)}</small><button type="button" className="text-button" onClick={onReadEventSummary} disabled={!speechSynthesisSupported}><Icon name="speaker" size={14} /> Read this summary aloud</button></> : <div className="audio-empty-link"><span>No verification result available yet.</span><button className="text-button" onClick={onOpenEvents}>Analyze an event <Icon name="arrow" size={14} /></button></div>}
+        </section>
+      </aside>
+    </div>
+    <section className="surface audio-history">
+      <div className="section-heading"><div><h2>Interaction history</h2><p>Actions performed during this browser session · not a stored audio recording</p></div><span className="history-count">{log.length}</span></div>
+      {log.length ? <div className="audio-log-list">{log.map((entry) => <div className="audio-log-row" key={entry.id}><span className={`log-kind ${entry.source.replace(/ /g, '-')}`}><Icon name={entry.source === 'browser audio' ? 'speaker' : entry.source === 'homeowner action' ? 'mic' : 'activity'} size={15} /></span><div><strong>{entry.title}</strong><p>{entry.detail}</p><small>{entry.source} · {formatDate(entry.timestamp)}</small></div></div>)}</div> : <EmptyState icon="speaker" title="No audio interactions yet" text="Audio previews, speech input, and simulated event actions you initiate will appear here." />}
+    </section>
+  </>;
+}
+
+function PerimeterPage({ events, loading, onSimulate, onSelectEvent }: { events: EventItem[]; loading: boolean; onSimulate: () => void; onSelectEvent: (id: string) => void }) {
+  const perimeterEvents = events.filter((event) => event.source === 'perimeter_simulator' || event.device_id === 'perimeter-front-door-demo');
+  const frontEvent = perimeterEvents[0];
+  const porchEvent = events.find((event) => event.device_id === 'ring-doorbell-demo');
+  const zones: Array<{ name: string; icon: string; event?: EventItem; connected: boolean; location: string }> = [
+    { name: 'Front door', icon: 'door', event: frontEvent, connected: false, location: 'Front entry' },
+    { name: 'Porch', icon: 'porch', event: porchEvent, connected: false, location: 'Delivery area' },
+    { name: 'Driveway', icon: 'car', connected: false, location: 'Vehicle approach' },
+    { name: 'Side entrance', icon: 'door', connected: false, location: 'Side access' },
+  ];
+  const recentActivity = events.filter((event) => event.source === 'perimeter_simulator' || event.source === 'simulator').slice(0, 6);
+  return <>
+    <PageHeading title="Perimeter awareness" description="A home-oriented view of simulated visitor activity. No sensors are connected." action={<button className="button button-primary" onClick={onSimulate} disabled={loading}><Icon name="plus" size={15} />{loading ? 'Creating event…' : 'Simulate front-door event'}</button>} />
+    <section className="perimeter-disclosure"><Icon name="alert" size={17} /><span><strong>Illustrative zones only.</strong> GuestVerify does not monitor a real perimeter, receive camera feeds, or detect threats. Events are generated only when you use the simulator.</span></section>
+    <div className="perimeter-layout">
+      <section className="surface property-panel">
+        <div className="section-heading"><div><h2>Home zones</h2><p>Click a zone with an event to open its verification detail.</p></div><span className="simulation-tag"><span />Simulated activity</span></div>
+        <div className="property-illustration" aria-label="Illustrative house and four activity zones">
+          <svg viewBox="0 0 420 220" role="img" aria-labelledby="home-outline-title">
+            <title id="home-outline-title">Illustration of a house with front door, porch, driveway, and side entrance zones</title>
+            <path d="M119 101 210 35l92 66v83H119z" className="house-outline" />
+            <path d="M103 104 210 25l106 79M145 83V58h34v1M211 184v-63h42v63M264 123h20v28h-20" className="house-detail" />
+            <path d="M142 184h-48m238 0h-42M91 190h234" className="site-line" />
+            <circle cx="231" cy="155" r="2.3" className="door-knob" />
+          </svg>
+          <span className="illustration-label illustration-front">Front door</span><span className="illustration-label illustration-drive">Driveway</span><span className="illustration-label illustration-porch">Porch</span><span className="illustration-label illustration-side">Side entrance</span>
+        </div>
+        <div className="zone-grid">{zones.map((zone) => {
+          const review = zone.event?.processing_status === 'REVIEW_REQUIRED';
+          const state = !zone.connected && !zone.event ? 'No connected sensor' : review ? 'Event requires review' : zone.event ? 'Simulated activity detected' : 'No recent simulated event';
+          return <button className={`zone-card ${zone.event ? 'has-event' : ''}`} key={zone.name} onClick={() => zone.event && onSelectEvent(zone.event.id)} disabled={!zone.event} aria-label={`${zone.name}: ${state}${zone.event ? ', open event detail' : ''}`}>
+            <span className="zone-icon"><Icon name={zone.icon} size={17} /></span><span className="zone-copy"><strong>{zone.name}</strong><small>{zone.location}</small></span><span className={`zone-status ${review ? 'warning' : zone.event ? 'active' : 'quiet'}`}><span />{state}</span>
+          </button>;
+        })}</div>
+      </section>
+      <aside className="surface perimeter-feed">
+        <div className="section-heading"><div><h2>Recent activity</h2><p>Real backend event history</p></div><span className="history-count">{recentActivity.length}</span></div>
+        {recentActivity.length ? <div className="perimeter-timeline">{recentActivity.map((event) => <button className="perimeter-event" key={event.id} onClick={() => onSelectEvent(event.id)}><span className={`timeline-marker ${outcomeClass(event.outcome || event.processing_status)}`} /><span><strong>{event.transcript || titleCase(event.event_type)}</strong><small>{event.device_id} · {formatDate(event.event_timestamp)}</small><StatusBadge value={event.outcome || event.processing_status} /></span></button>)}</div> : <EmptyState icon="activity" title="No perimeter events" text="Use the simulator to record a sample front-door activity." />}
+        <button className="button button-secondary perimeter-simulate" onClick={onSimulate} disabled={loading}><Icon name="activity" size={15} /> Simulate visitor approached front door</button>
+      </aside>
+    </div>
+    <div className="perimeter-note"><Icon name="shield" size={16} /><span>Simulated activity can help demonstrate the event workflow. It is not live monitoring and does not indicate an intrusion.</span></div>
+  </>;
+}
+
+function IntegrationsPage({ provider, connected, speechRecognitionSupported, speechSynthesisSupported, audioContextSupported, onRefresh }: { provider: ProviderStatus | null; connected: boolean | null; speechRecognitionSupported: boolean; speechSynthesisSupported: boolean; audioContextSupported: boolean; onRefresh: () => void }) {
   const localMode = provider?.provider_mode === 'local_demo';
   return <>
     <PageHeading title="Integrations" description="Check the application’s configured processing mode and service availability." action={<button className="button button-secondary" onClick={onRefresh}><Icon name="refresh" size={16} /> Refresh status</button>} />
@@ -763,6 +1147,8 @@ function IntegrationsPage({ provider, connected, onRefresh }: { provider: Provid
         <IntegrationCard icon="activity" title="Ring activity" status="Simulated" tone="warning" text="Visitor activity comes from the in-app simulator; no Ring account is connected." />
         <IntegrationCard icon="lock" title="Physical actions" status="Not available" tone="neutral" text="The workflow can record an explicitly approved simulated action. No lock or physical device is operated." />
         <IntegrationCard icon="nodes" title="MCP server" status="Not hosted here" tone="neutral" text="The Streamable HTTP MCP server runs separately; this Vercel deployment does not verify its availability." />
+        <IntegrationCard icon="mic" title="Speech input" status={speechRecognitionSupported ? 'Browser capability available' : 'Not supported in this browser'} tone={speechRecognitionSupported ? 'warning' : 'neutral'} text={speechRecognitionSupported ? 'Recognition starts only on request and may use the browser’s online speech service.' : 'Voice input is unavailable; text questions continue to work.'} />
+        <IntegrationCard icon="speaker" title="Local audio playback" status={speechSynthesisSupported && audioContextSupported ? 'Available in this browser' : 'Partially unavailable'} tone={speechSynthesisSupported && audioContextSupported ? 'positive' : 'neutral'} text={`Speech synthesis: ${speechSynthesisSupported ? 'available' : 'unavailable'}. Generated sound sample: ${audioContextSupported ? 'available' : 'unavailable'}. Playback stays on the homeowner's current device.`} />
       </div>
     </section>
     <section className="surface mode-explainer"><span className="explainer-icon"><Icon name="shield" size={19} /></span><div><h3>Verification remains the trust boundary</h3><p>Visitor statements are treated as claims. GuestVerify compares those claims with expected deliveries and available evidence; a model response or matching description does not authorize access. Vercel’s demo database is ephemeral and is not suitable for persistent operational records.</p></div></section>
